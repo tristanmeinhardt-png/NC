@@ -677,48 +677,6 @@ print "Welcome to NC Demo"
 (music) = checkmark "Music" color "cyan"
 (hardmode) = checkmark "Hard Mode" color "red"
 
-fn show_settings():
-  if sound is on:
-    print "Sound: ON"
-  else:
-    print "Sound: OFF"
-
-  if music is on:
-    print "Music: ON"
-  else:
-    print "Music: OFF"
-
-  if hardmode is on:
-    print "Hard Mode: ON"
-  else:
-    print "Hard Mode: OFF"
-
-fn intro():
-  print "This is a large NC demo"
-  print "Use buttons and checkmarks"
-  print "Settings can be saved"
-
-fn play_game():
-  print "Game started"
-  if hardmode is on:
-    print "Enemies are stronger"
-  else:
-    print "Normal difficulty"
-
-fn repeat_demo():
-  repeat 3 times:
-    print "Repeat block running"
-
-fn save_settings():
-  json.save("demo_settings", {
-    "sound": sound,
-    "music": music,
-    "hardmode": hardmode
-  })
-  print "Settings saved"
-
-intro()
-
 button "Show Settings":
   action:
     show_settings()
@@ -738,6 +696,37 @@ button "Save Settings":
 button "Exit":
   action:
     print "Program ended"
+
+fn show_settings():
+  if sound is on:
+    print "Sound: ON"
+  else:
+    print "Sound: OFF"
+
+  if music is on:
+    print "Music: ON"
+  else:
+    print "Music: OFF"
+
+  if hardmode is on:
+    print "Hard Mode: ON"
+  else:
+    print "Hard Mode: OFF"
+
+fn play_game():
+  print "Game started"
+  if hardmode is on:
+    print "Enemies are stronger"
+  else:
+    print "Normal difficulty"
+
+fn repeat_demo():
+  repeat 3 times:
+    print "Repeat block running"
+
+fn save_settings():
+  json.save("demo_settings", {"sound": sound, "music": music, "hardmode": hardmode})
+  print "Settings saved"
 ```
 
 # Structure explanation
