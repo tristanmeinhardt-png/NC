@@ -6,13 +6,12 @@ import mimetypes
 import urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
-import nc  # deine nc.py
+import nc
 
 MAX_BODY_BYTES = 512_000
 MAX_CODE_BYTES = 200_000
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8080
-
 
 PLAYGROUND_HTML = """<!doctype html>
 <html lang="de">
@@ -24,67 +23,121 @@ PLAYGROUND_HTML = """<!doctype html>
     :root{color-scheme:dark}
     *{box-sizing:border-box}
     body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#0f1115;color:#eef2ff}
-    .wrap{max-width:1200px;margin:0 auto;padding:18px}
+    .wrap{max-width:1320px;margin:0 auto;padding:18px}
     .card{background:#171a21;border:1px solid #2b3140;border-radius:16px;padding:16px;box-shadow:0 8px 28px rgba(0,0,0,.25)}
     h1{margin:0 0 8px 0;font-size:24px}
     .muted{color:#9aa4b8;font-size:14px}
-    .grid{display:grid;grid-template-columns:1.1fr .9fr;gap:14px;margin-top:14px}
-    @media (max-width:900px){.grid{grid-template-columns:1fr}}
-    textarea,input{width:100%;border:1px solid #31384a;border-radius:12px;background:#0f131b;color:#eef2ff;padding:12px;font:14px/1.4 Consolas,Monaco,monospace}
-    textarea{min-height:460px;resize:vertical}
-    input{font-family:Arial,Helvetica,sans-serif}
+    .grid{display:grid;grid-template-columns:1.2fr .8fr;gap:14px;margin-top:14px}
+    @media (max-width:980px){.grid{grid-template-columns:1fr}}
+    textarea,input,select{width:100%;border:1px solid #31384a;border-radius:12px;background:#0f131b;color:#eef2ff;padding:12px;font:14px/1.4 Consolas,Monaco,monospace}
+    input,select{font-family:Arial,Helvetica,sans-serif}
+    textarea{min-height:520px;resize:vertical}
     button{border:1px solid #4d6bff;background:#3555ff;color:white;padding:10px 14px;border-radius:12px;font-weight:700;cursor:pointer}
     button.ghost{background:#1a2030;border-color:#39445f}
+    button.warn{background:#402615;border-color:#7c4b2d}
     button:hover{filter:brightness(1.08)}
     .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-    pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f131b;border:1px solid #31384a;border-radius:12px;padding:12px;min-height:240px;max-height:520px;overflow:auto}
+    .stack{display:flex;flex-direction:column;gap:10px}
+    pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f131b;border:1px solid #31384a;border-radius:12px;padding:12px;min-height:260px;max-height:520px;overflow:auto}
     .err{color:#ffb4b4}
     .ok{color:#b7ffd0}
     .small{font-size:12px;color:#90a0bf}
     .badge{display:inline-block;padding:4px 8px;border-radius:999px;background:#1b2340;border:1px solid #33406c;font-size:12px;color:#b8c7ff}
+    .hint{background:#101622;border:1px solid #22304a;border-radius:12px;padding:10px;font-size:13px;color:#b8c7ff}
+    .examples{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    @media (max-width:980px){.examples{grid-template-columns:1fr}}
+    .pill{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;background:#101622;border:1px solid #2a3757;font-size:12px;color:#b8c7ff}
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="card">
       <h1>NC Browser Runner <span class="badge">NC only</span></h1>
-      <div class="muted">Führt nur NC-Code aus. Python-Code wird hier nicht gestartet.</div>
+      <div class="muted">Führt nur NC-Code aus. Keine Python-Bridge, kein Python-Upload, kein Python-Start.</div>
       <div class="row" style="margin-top:12px">
         <button id="runBtn" type="button">▶ Ausführen</button>
-        <button id="sampleBtn" class="ghost" type="button">Beispiel laden</button>
+        <button id="saveBtn" class="ghost" type="button">💾 Im Browser speichern</button>
+        <button id="loadBtn" class="ghost" type="button">📂 Laden</button>
+        <button id="clearBtn" class="warn" type="button">🗑 Leeren</button>
+      </div>
+      <div class="row" style="margin-top:10px">
         <input id="pathInput" placeholder="Virtueller Pfad für Fehlermeldungen, z.B. browser_demo.nc" value="browser_demo.nc" />
+        <select id="exampleSelect">
+          <option value="">Beispiel laden …</option>
+          <option value="hello">Hallo Welt</option>
+          <option value="math">Rechnen</option>
+          <option value="ifdemo">If/Else</option>
+          <option value="loopdemo">Repeat/Loop</option>
+        </select>
       </div>
     </div>
 
     <div class="grid">
-      <div class="card">
-        <div class="muted" style="margin-bottom:8px">Code</div>
+      <div class="card stack">
+        <div class="muted">Code</div>
         <textarea id="codeInput">print "Hallo aus NC im Browser!"
 let x = 5
 let y = 7
 print "x + y =", x + y</textarea>
+        <div class="hint">Tipp: <span class="pill">Strg + Enter</span> zum Ausführen.</div>
       </div>
 
-      <div class="card">
-        <div class="row" style="justify-content:space-between;margin-bottom:8px">
+      <div class="card stack">
+        <div class="row" style="justify-content:space-between">
           <div class="muted">Ausgabe</div>
           <div id="status" class="small">Bereit</div>
         </div>
         <pre id="output"></pre>
-        <div class="small" style="margin-top:10px">Geblockt werden zusätzlich offensichtliche Python-Bridge-Aufrufe wie <code>import py</code> oder <code>py.</code>.</div>
+        <div class="small">Geblockt werden zusätzlich offensichtliche Python-Bridge-Aufrufe wie <code>import py</code>, <code>py.</code>, <code>import pkg</code> oder <code>import package</code>.</div>
+        <div class="examples">
+          <div class="hint"><strong>Route:</strong><br><code>GET /__nc_playground</code></div>
+          <div class="hint"><strong>API:</strong><br><code>POST /__nc_exec__</code></div>
+        </div>
       </div>
     </div>
   </div>
 
 <script>
+const STORAGE_KEY = 'nc_browser_runner_code_v2';
+const PATH_KEY = 'nc_browser_runner_path_v2';
 const out = document.getElementById('output');
 const statusEl = document.getElementById('status');
 const codeEl = document.getElementById('codeInput');
 const pathEl = document.getElementById('pathInput');
+const exampleEl = document.getElementById('exampleSelect');
+
+const EXAMPLES = {
+  hello: 'print "Hallo aus NC!"\nprint "Das läuft im Browser als NC."',
+  math: 'let a = 8\nlet b = 5\nprint "a + b =", a + b\nprint "a * b =", a * b\nprint "a / b =", a / b',
+  ifdemo: 'let alter = 12\nif alter >= 12:\n  print "Du bist 12 oder älter."\nelse:\n  print "Du bist jünger als 12."',
+  loopdemo: 'let n = 1\nrepeat 5:\n  print "Zeile", n\n  set n = n + 1'
+};
 
 function setStatus(text, cls=''){
   statusEl.className = 'small ' + cls;
   statusEl.textContent = text;
+}
+
+function saveLocal(){
+  try{
+    localStorage.setItem(STORAGE_KEY, codeEl.value || '');
+    localStorage.setItem(PATH_KEY, pathEl.value || 'browser_demo.nc');
+    setStatus('Im Browser gespeichert', 'ok');
+  }catch(e){
+    setStatus('Speichern fehlgeschlagen', 'err');
+  }
+}
+
+function loadLocal(){
+  try{
+    const code = localStorage.getItem(STORAGE_KEY);
+    const path = localStorage.getItem(PATH_KEY);
+    if (code !== null) codeEl.value = code;
+    if (path !== null) pathEl.value = path;
+    setStatus(code !== null ? 'Geladen' : 'Nichts gespeichert');
+  }catch(e){
+    setStatus('Laden fehlgeschlagen', 'err');
+  }
 }
 
 async function runCode(){
@@ -104,6 +157,7 @@ async function runCode(){
     }
     out.textContent = data.output || '';
     setStatus('Fertig', 'ok');
+    saveLocal();
   }catch(e){
     out.textContent = String(e && e.message ? e.message : e);
     setStatus('Fehler', 'err');
@@ -111,12 +165,23 @@ async function runCode(){
 }
 
 document.getElementById('runBtn').addEventListener('click', runCode);
-document.getElementById('sampleBtn').addEventListener('click', () => {
-  codeEl.value = 'print "NC Browser Demo"\nlet n = 3\nrepeat n:\n  print "Zeile", n';
+document.getElementById('saveBtn').addEventListener('click', saveLocal);
+document.getElementById('loadBtn').addEventListener('click', loadLocal);
+document.getElementById('clearBtn').addEventListener('click', () => {
+  codeEl.value = '';
+  out.textContent = '';
+  setStatus('Editor geleert');
+});
+exampleEl.addEventListener('change', () => {
+  if (!exampleEl.value || !EXAMPLES[exampleEl.value]) return;
+  codeEl.value = EXAMPLES[exampleEl.value];
+  setStatus('Beispiel geladen');
+  exampleEl.value = '';
 });
 codeEl.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') runCode();
 });
+loadLocal();
 </script>
 </body>
 </html>
@@ -209,7 +274,7 @@ def _run_nc_file(path: str, request_obj: dict, project_root: str) -> tuple[int, 
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "NCServer/1.3"
+    server_version = "NCServer/1.4"
 
     def do_GET(self):
         self._handle()
@@ -268,8 +333,8 @@ class Handler(BaseHTTPRequestHandler):
 
         return body, body_text, req_json, req_form
 
-    def _handle_exec_api(self, project_root: str, req_json: dict | None):
-        payload = req_json if isinstance(req_json, dict) else {}
+    def _handle_exec_api(self, project_root: str, req_json: dict | None, req_form: dict | None):
+        payload = req_json if isinstance(req_json, dict) else (req_form if isinstance(req_form, dict) else {})
         code = payload.get("code", "")
         source_name = payload.get("path", "browser_demo.nc") or "browser_demo.nc"
         if not isinstance(code, str):
@@ -307,7 +372,18 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if url_path == "/__nc_exec__" and self.command == "POST":
-            self._handle_exec_api(project_root=root, req_json=req_json)
+            self._handle_exec_api(project_root=root, req_json=req_json, req_form=req_form)
+            return
+
+        if url_path == "/__nc_exec__" and self.command == "GET":
+            self._send_json(200, {
+                "ok": True,
+                "name": "NC Browser Runner API",
+                "method": "POST",
+                "accepts": ["application/json", "application/x-www-form-urlencoded"],
+                "fields": ["code", "path"],
+                "max_code_bytes": MAX_CODE_BYTES,
+            })
             return
 
         if url_path.startswith("/api/"):
