@@ -8,15 +8,15 @@ NC uses `.nc` files as source files. These files are executed by the NC interpre
 
 NC is focused on:
 
-* simple syntax
-* readable commands
-* quick scripting
-* reusable functions
-* repeat blocks
-* console UI elements
-* optional GUI/TWIN output
-* optional EXE export
-* Windows-oriented workflows
+- simple syntax
+- readable commands
+- quick scripting
+- reusable functions
+- repeat blocks
+- console UI elements
+- optional GUI/TWIN output
+- optional EXE export
+- Windows-oriented workflows
 
 ---
 
@@ -32,10 +32,10 @@ C:\Users\(Your name)\NC\standart_imports
 
 Why:
 
-* the interpreter is configured around a Windows default imports path
-* the CLI workflow is built around Windows usage
-* EXE export is Windows-focused
-* surrounding tools use Windows-style paths and environments
+- the interpreter is configured around a Windows default imports path
+- the CLI workflow is built around Windows usage
+- EXE export is Windows-focused
+- surrounding tools use Windows-style paths and environments
 
 Other operating systems may work partially, but they are not the target platform.
 
@@ -43,11 +43,11 @@ Other operating systems may work partially, but they are not the target platform
 
 ## Main project files
 
-* `nc.py` → main interpreter
-* `nc_console.py` → command-line launcher and EXE export
-* `nc_server.py` → HTTP server that runs NC files
-* `nc_twin_run.py` → GUI/TWIN host for windows, tables, plots, and HTML output
-* `t_windows.py` → TWIN / window message helper
+- `nc.py` → main interpreter
+- `nc_console.py` → command-line launcher and EXE export
+- `nc_server.py` → HTTP server that runs NC files
+- `nc_twin_run.py` → GUI/TWIN host for windows, tables, plots, and HTML output
+- `t_windows.py` → TWIN / window message helper
 
 ---
 
@@ -59,7 +59,7 @@ For the basic interpreter, NC mainly relies on Python's standard library.
 
 Recommended Python version:
 
-* Python 3.10 or newer
+- Python 3.10 or newer
 
 ### Optional but recommended modules
 
@@ -71,9 +71,9 @@ pip install pyinstaller PySide6 PySide6-QtWebEngine
 
 ### What they are used for
 
-* `pyinstaller` → export `.nc` files as Windows `.exe` files
-* `PySide6` → GUI window support in `nc_twin_run.py`
-* `PySide6-QtWebEngine` → HTML/JS rendering support in GUI windows
+- `pyinstaller` → export `.nc` files as Windows `.exe` files
+- `PySide6` → GUI window support in `nc_twin_run.py`
+- `PySide6-QtWebEngine` → HTML/JS rendering support in GUI windows
 
 If you only want the basic console language and do not need GUI output or EXE export, Python alone may already be enough for large parts of NC.
 
@@ -87,7 +87,17 @@ Run a local NC file:
 python nc_console.py my_program.nc
 ```
 
-NC can also support URL targets and EXE export through the CLI.
+If you have a wrapper/alias installed, this may also work:
+
+```bash
+nc my_program.nc
+```
+
+### Important for buttons and checkmarks
+
+Buttons are shown best in a real interactive terminal such as normal Windows CMD or PowerShell.
+
+If NC is started in a non-interactive environment, button rendering may not be shown properly.
 
 ---
 
@@ -197,7 +207,7 @@ else:
 
 ## 8. Buttons
 
-**Important:** inside a button block, action code must be placed inside `action:`.
+Inside a button block, action code must be placed inside `action:`.
 
 Correct example:
 
@@ -233,19 +243,21 @@ button "Exit":
 
 ## 9. Checkmarks
 
+Basic example:
+
 ```nc
 (sound) = checkmark "Sound"
 (music) = checkmark "Music"
 
-if sound is on:
+if sound:
   print "Sound is enabled"
 else:
   print "Sound is disabled"
 
-if music is off:
-  print "Music is disabled"
-else:
+if music:
   print "Music is enabled"
+else:
+  print "Music is disabled"
 ```
 
 Color example:
@@ -259,6 +271,29 @@ Alias example:
 ```nc
 tick = checkmark
 (music) = tick "Music"
+```
+
+### `is on` / `is off`
+
+This syntax only works if you use the patched interpreter build that adds `is on` / `is off` support.
+
+Example with patched build:
+
+```nc
+if sound is on:
+  print "Sound is enabled"
+
+if music is off:
+  print "Music is disabled"
+```
+
+If you use the normal interpreter, prefer this safer form:
+
+```nc
+if sound:
+  print "Sound is enabled"
+else:
+  print "Sound is disabled"
 ```
 
 ## 10. Colors
@@ -284,16 +319,35 @@ print math.pi
 import json
 ```
 
-## 12. Save / load ideas
+## 12. Saving and loading data
 
-Because NC already has JSON-related built-in module support, save/load features fit naturally into the language design.
+`save checkmarks` and `load checkmarks` are not built-in language commands in the current working setup.
+
+Use the `json` module instead.
+
+### Save example
 
 ```nc
-save settings
-load settings
+import json
 
-save checkmarks "my_settings"
-load checkmarks "my_settings"
+json.save("my_settings", {
+  "sound": sound,
+  "music": music,
+  "hardmode": hardmode
+})
+```
+
+### Load example
+
+```nc
+import json
+
+data = json.load("my_settings", {})
+
+if data["sound"]:
+  print "Saved sound was ON"
+else:
+  print "Saved sound was OFF"
 ```
 
 ## 13. GUI / TWIN output
@@ -302,11 +356,11 @@ NC can also produce structured GUI-style output through `__TWIN__` messages.
 
 The GUI host can render:
 
-* windows
-* tables
-* plots
-* HTML content
-* TWIN / t_windows style messages
+- windows
+- tables
+- plots
+- HTML content
+- TWIN / t_windows style messages
 
 ## 14. NC server mode
 
@@ -314,10 +368,10 @@ The GUI host can render:
 
 It can:
 
-* map HTTP requests to NC files
-* inject request data into NC code
-* capture NC output
-* return HTTP metadata and body content
+- map HTTP requests to NC files
+- inject request data into NC code
+- capture NC output
+- return HTTP metadata and body content
 
 # Step-by-step tutorial
 
@@ -404,6 +458,22 @@ button "Exit":
 
 ## Step 8: Add checkmarks
 
+Safe version:
+
+```nc
+(sound) = checkmark "Sound" color "green"
+(music) = checkmark "Music" color "cyan"
+
+button "Continue":
+  action:
+    if sound:
+      print "Sound is on"
+    else:
+      print "Sound is off"
+```
+
+Patched-interpreter version:
+
 ```nc
 (sound) = checkmark "Sound" color "green"
 (music) = checkmark "Music" color "cyan"
@@ -471,23 +541,30 @@ button "Stay":
 ## 3. Settings menu game
 
 ```nc
-load checkmarks "settings"
+import json
 
 (sound) = checkmark "Sound" color "green"
 (music) = checkmark "Music" color "yellow"
 (hardmode) = checkmark "Hard Mode" color "red"
 
+fn save_settings():
+  json.save("settings", {
+    "sound": sound,
+    "music": music,
+    "hardmode": hardmode
+  })
+  print "Saved"
+
 button "Start Game":
   action:
-    if hardmode is on:
+    if hardmode:
       print "Hard mode enabled"
     else:
       print "Normal mode enabled"
 
 button "Save Settings":
   action:
-    save checkmarks "settings"
-    print "Saved"
+    save_settings()
 
 button "Exit":
   action:
@@ -515,7 +592,85 @@ button "Show Score":
 
 # Big demo file
 
+## Safe version for the normal interpreter
+
 ```nc
+import json
+
+print "Welcome to NC Demo"
+
+(sound) = checkmark "Sound" color "green"
+(music) = checkmark "Music" color "cyan"
+(hardmode) = checkmark "Hard Mode" color "red"
+
+fn show_settings():
+  if sound:
+    print "Sound: ON"
+  else:
+    print "Sound: OFF"
+
+  if music:
+    print "Music: ON"
+  else:
+    print "Music: OFF"
+
+  if hardmode:
+    print "Hard Mode: ON"
+  else:
+    print "Hard Mode: OFF"
+
+fn intro():
+  print "This is a large NC demo"
+  print "Use buttons and checkmarks"
+  print "Settings can be saved"
+
+fn play_game():
+  print "Game started"
+  if hardmode:
+    print "Enemies are stronger"
+  else:
+    print "Normal difficulty"
+
+fn repeat_demo():
+  repeat 3 times:
+    print "Repeat block running"
+
+fn save_settings():
+  json.save("demo_settings", {
+    "sound": sound,
+    "music": music,
+    "hardmode": hardmode
+  })
+  print "Settings saved"
+
+intro()
+
+button "Show Settings":
+  action:
+    show_settings()
+
+button "Play":
+  action:
+    play_game()
+
+button "Repeat Demo":
+  action:
+    repeat_demo()
+
+button "Save Settings":
+  action:
+    save_settings()
+
+button "Exit":
+  action:
+    print "Program ended"
+```
+
+## Version for the patched `is on` / `is off` interpreter
+
+```nc
+import json
+
 print "Welcome to NC Demo"
 
 (sound) = checkmark "Sound" color "green"
@@ -554,6 +709,14 @@ fn repeat_demo():
   repeat 3 times:
     print "Repeat block running"
 
+fn save_settings():
+  json.save("demo_settings", {
+    "sound": sound,
+    "music": music,
+    "hardmode": hardmode
+  })
+  print "Settings saved"
+
 intro()
 
 button "Show Settings":
@@ -570,8 +733,7 @@ button "Repeat Demo":
 
 button "Save Settings":
   action:
-    save checkmarks "demo_settings"
-    print "Settings saved"
+    save_settings()
 
 button "Exit":
   action:
@@ -580,13 +742,13 @@ button "Exit":
 
 # Structure explanation
 
-* `nc.py` → main interpreter
-* `nc_console.py` → CLI runner and EXE export
-* `nc_server.py` → server-based NC execution
-* `nc_twin_run.py` → GUI/TWIN host
-* `examples/` → learning examples
-* `docs/` → beginner-friendly documentation
-* `standart_imports/` → standard import modules as named in the interpreter configuration
+- `nc.py` → main interpreter
+- `nc_console.py` → CLI runner and EXE export
+- `nc_server.py` → server-based NC execution
+- `nc_twin_run.py` → GUI/TWIN host
+- `examples/` → learning examples
+- `docs/` → beginner-friendly documentation
+- `standart_imports/` → standard import modules as named in the interpreter configuration
 
 ## Suggested requirements.txt
 
@@ -598,9 +760,10 @@ PySide6-QtWebEngine
 
 ## Good next files to add
 
-* `README.md`
-* `requirements.txt`
-* `LICENSE`
-* `examples/`
-* `docs/syntax.md`
-* `docs/tutorial.md`
+- `README.md`
+- `requirements.txt`
+- `LICENSE`
+- `examples/`
+- `docs/syntax.md`
+- `docs/tutorial.md`
+
