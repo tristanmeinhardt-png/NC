@@ -416,17 +416,7 @@ button "Continue":
       print "Sound is off"
 ```
 
-## Step 9: Save settings
-
-```nc
-load checkmarks "game_settings"
-
-button "Save":
-  action:
-    save checkmarks "game_settings"
-```
-
-## Step 10: Export your program
+## Step 9: Export your program
 
 ```bash
 python nc_console.py my_game.nc --exe
@@ -527,8 +517,6 @@ button "Show Score":
 
 ```nc
 print "Welcome to NC Demo"
-
-load checkmarks "demo_settings"
 
 (sound) = checkmark "Sound" color "green"
 (music) = checkmark "Music" color "cyan"
