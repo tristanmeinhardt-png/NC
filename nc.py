@@ -3252,6 +3252,10 @@ class NCInterpreter:
         self._current_index: int = -1
         self._resolving_names: set[str] = set()
         self._forward_scan_limit: int = 6000  # max statements to scan ahead (guard)
+        # Whole-program forward lookup registry (per source file).
+        # This lets button action blocks resolve names that are defined later
+        # outside the current nested block.
+        self._program_blocks: List[Tuple[str, List[Stmt]]] = []
 
     def _tick_steps(self, n: int = 1):
         self.step_counter += n
@@ -3317,12 +3321,51 @@ class NCInterpreter:
             raise NCExprError(f"Unknown name: {name}.{hint}")
 
     def _try_forward_resolve(self, name: str, env: Dict[str, Any], source_name: str, line: int) -> bool:
-        """Best-effort: resolve a missing name by scanning later statements."""
+        """Best-effort: resolve a missing name by scanning later statements.
+
+        Bugfix:
+        The old implementation only scanned the remaining statements of the
+        current block. That failed for button action blocks, because the action
+        runs in its own nested block and therefore could not see functions that
+        are defined later at top level in the same file.
+
+        New behavior:
+        1) scan the remaining statements of the current block first
+        2) if still unresolved, scan all registered blocks from the same source
+           file (whole-program scan for the current file)
+        """
         blk = self._current_block or []
         i0 = max(-1, int(self._current_index))
-        remaining = blk[i0 + 1 : i0 + 1 + self._forward_scan_limit]
 
-        for st in remaining:
+        candidates: List[Stmt] = []
+        seen_stmt_ids: set[int] = set()
+
+        def _append_stmt(st: Stmt) -> None:
+            sid = id(st)
+            if sid in seen_stmt_ids:
+                return
+            seen_stmt_ids.add(sid)
+            candidates.append(st)
+
+        # 1) current block remainder
+        for st in blk[i0 + 1 : i0 + 1 + self._forward_scan_limit]:
+            _append_stmt(st)
+
+        # 2) whole-program scan for same source
+        current_block_id = id(blk) if blk else None
+        for src, block in self._program_blocks:
+            if src != source_name:
+                continue
+            if current_block_id is not None and id(block) == current_block_id:
+                continue
+            for st in block:
+                _append_stmt(st)
+                if len(candidates) >= self._forward_scan_limit:
+                    break
+            if len(candidates) >= self._forward_scan_limit:
+                break
+
+        for st in candidates:
             try:
                 if st.kind in ("let", "set") and st.data.get("name") == name:
                     val = safe_eval_expr(st.data.get("expr") or "None", env, self.policy)
@@ -3351,7 +3394,6 @@ class NCInterpreter:
                 continue
 
         return False
-
 
     def _with_source(self, source: str, push_stack: bool = False):
         class _Ctx:
@@ -4462,6 +4504,17 @@ class NCInterpreter:
         source_name: str = "<text>",
     ):
         self._base_dir_current = base_dir
+
+        # Register every executed block once so forward lookup can scan the
+        # whole program of the current source file, not only the current block.
+        already_known = False
+        for _src, _blk in self._program_blocks:
+            if _src == source_name and _blk is stmts:
+                already_known = True
+                break
+        if not already_known:
+            self._program_blocks.append((source_name, stmts))
+
         i = 0
         while i < len(stmts):
             st = stmts[i]
