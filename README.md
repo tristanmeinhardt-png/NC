@@ -27,7 +27,7 @@ NC is currently intended for Windows only.
 Typical directory example:
 
 ```text
-C:\Users\(Your name)\NC\standart_imports
+C:\Users\(Your name)\NC\
 ```
 
 Why:
