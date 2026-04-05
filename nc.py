@@ -6135,3 +6135,25 @@ if '_friendly_error_message' not in globals():
             if needle in s:
                 return s + ' | Hint: ' + hint
         return s
+
+
+
+# --- BUGFIX PATCH: allow 'if var is on/off:' syntax for checkmarks ---
+# maps 'on' -> True and 'off' -> False inside comparisons
+
+_old_safe_eval_expr = safe_eval_expr
+
+def _nc_on_off_literal(value):
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s == "on":
+            return True
+        if s == "off":
+            return False
+    return value
+
+def safe_eval_expr(expr: str, env: dict, policy):
+    expr = expr.replace(" is on", " == True")
+    expr = expr.replace(" is off", " == False")
+    return _old_safe_eval_expr(expr, env, policy)
+# --- END BUGFIX PATCH ---
