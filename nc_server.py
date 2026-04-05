@@ -1,611 +1,385 @@
 import os
 import sys
+import re
 import json
-import time
-import base64
-import secrets
-import hashlib
 import mimetypes
 import urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
-# ----------------------------
-# Utils
-# ----------------------------
+import nc  # deine nc.py
 
-def _json_load(path, default):
-  try:
-    if not os.path.isfile(path):
-      return default
-    with open(path, "r", encoding="utf-8") as f:
-      return json.load(f)
-  except Exception:
-    return default
+MAX_BODY_BYTES = 512_000
+MAX_CODE_BYTES = 200_000
+DEFAULT_HOST = "0.0.0.0"
+DEFAULT_PORT = 8080
 
-def _json_save(path, obj):
-  os.makedirs(os.path.dirname(path), exist_ok=True)
-  tmp = path + ".tmp"
-  with open(tmp, "w", encoding="utf-8") as f:
-    json.dump(obj, f, ensure_ascii=False, indent=2)
-  os.replace(tmp, path)
 
-def _send_json(h, status, obj):
-  body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-  h.send_response(status)
-  h.send_header("Content-Type", "application/json; charset=utf-8")
-  h.send_header("Cache-Control", "no-store")
-  # CORS optional (harmless for localhost)
-  h.send_header("Access-Control-Allow-Origin", "*")
-  h.send_header("Access-Control-Allow-Headers", "Content-Type")
-  h.send_header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
-  h.send_header("Content-Length", str(len(body)))
-  h.end_headers()
-  h.wfile.write(body)
+PLAYGROUND_HTML = """<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>NC Browser Runner</title>
+  <style>
+    :root{color-scheme:dark}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#0f1115;color:#eef2ff}
+    .wrap{max-width:1200px;margin:0 auto;padding:18px}
+    .card{background:#171a21;border:1px solid #2b3140;border-radius:16px;padding:16px;box-shadow:0 8px 28px rgba(0,0,0,.25)}
+    h1{margin:0 0 8px 0;font-size:24px}
+    .muted{color:#9aa4b8;font-size:14px}
+    .grid{display:grid;grid-template-columns:1.1fr .9fr;gap:14px;margin-top:14px}
+    @media (max-width:900px){.grid{grid-template-columns:1fr}}
+    textarea,input{width:100%;border:1px solid #31384a;border-radius:12px;background:#0f131b;color:#eef2ff;padding:12px;font:14px/1.4 Consolas,Monaco,monospace}
+    textarea{min-height:460px;resize:vertical}
+    input{font-family:Arial,Helvetica,sans-serif}
+    button{border:1px solid #4d6bff;background:#3555ff;color:white;padding:10px 14px;border-radius:12px;font-weight:700;cursor:pointer}
+    button.ghost{background:#1a2030;border-color:#39445f}
+    button:hover{filter:brightness(1.08)}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    pre{margin:0;white-space:pre-wrap;word-break:break-word;background:#0f131b;border:1px solid #31384a;border-radius:12px;padding:12px;min-height:240px;max-height:520px;overflow:auto}
+    .err{color:#ffb4b4}
+    .ok{color:#b7ffd0}
+    .small{font-size:12px;color:#90a0bf}
+    .badge{display:inline-block;padding:4px 8px;border-radius:999px;background:#1b2340;border:1px solid #33406c;font-size:12px;color:#b8c7ff}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>NC Browser Runner <span class="badge">NC only</span></h1>
+      <div class="muted">Führt nur NC-Code aus. Python-Code wird hier nicht gestartet.</div>
+      <div class="row" style="margin-top:12px">
+        <button id="runBtn" type="button">▶ Ausführen</button>
+        <button id="sampleBtn" class="ghost" type="button">Beispiel laden</button>
+        <input id="pathInput" placeholder="Virtueller Pfad für Fehlermeldungen, z.B. browser_demo.nc" value="browser_demo.nc" />
+      </div>
+    </div>
 
-def _send_text(h, status, text, ctype="text/plain; charset=utf-8"):
-  data = (text or "").encode("utf-8", errors="replace")
-  h.send_response(status)
-  h.send_header("Content-Type", ctype)
-  h.send_header("Content-Length", str(len(data)))
-  h.end_headers()
-  h.wfile.write(data)
+    <div class="grid">
+      <div class="card">
+        <div class="muted" style="margin-bottom:8px">Code</div>
+        <textarea id="codeInput">print "Hallo aus NC im Browser!"
+let x = 5
+let y = 7
+print "x + y =", x + y</textarea>
+      </div>
 
-def _read_body_json(h):
-  length = int(h.headers.get("Content-Length", "0") or "0")
-  raw = h.rfile.read(length) if length > 0 else b""
-  if not raw:
-    return {}
-  try:
-    return json.loads(raw.decode("utf-8", errors="replace"))
-  except Exception:
-    return {}
+      <div class="card">
+        <div class="row" style="justify-content:space-between;margin-bottom:8px">
+          <div class="muted">Ausgabe</div>
+          <div id="status" class="small">Bereit</div>
+        </div>
+        <pre id="output"></pre>
+        <div class="small" style="margin-top:10px">Geblockt werden zusätzlich offensichtliche Python-Bridge-Aufrufe wie <code>import py</code> oder <code>py.</code>.</div>
+      </div>
+    </div>
+  </div>
 
-def _cookie_parse(cookie_header: str):
-  out = {}
-  if not cookie_header:
-    return out
-  parts = cookie_header.split(";")
-  for p in parts:
-    if "=" in p:
-      k, v = p.split("=", 1)
-      out[k.strip()] = v.strip()
-  return out
+<script>
+const out = document.getElementById('output');
+const statusEl = document.getElementById('status');
+const codeEl = document.getElementById('codeInput');
+const pathEl = document.getElementById('pathInput');
 
-def _cookie_set(h, name, value, max_age=None):
-  # HttpOnly session cookie
-  # SameSite=Lax => funktioniert normal im Browser
-  s = f"{name}={value}; Path=/; HttpOnly; SameSite=Lax"
-  if max_age is not None:
-    s += f"; Max-Age={int(max_age)}"
-  h.send_header("Set-Cookie", s)
+function setStatus(text, cls=''){
+  statusEl.className = 'small ' + cls;
+  statusEl.textContent = text;
+}
 
-def _cookie_clear(h, name):
-  h.send_header("Set-Cookie", f"{name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
-
-def _hash_pw(password: str, salt_hex: str = None):
-  salt = bytes.fromhex(salt_hex) if salt_hex else secrets.token_bytes(16)
-  dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000)
-  return {"salt": salt.hex(), "hash": dk.hex()}
-
-def _verify_pw(password: str, rec: dict):
-  try:
-    salt = bytes.fromhex(rec["salt"])
-    want = rec["hash"]
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000)
-    return dk.hex() == want
-  except Exception:
-    return False
-
-def _safe_rel(path: str):
-  # normalize, block traversal
-  p = (path or "").replace("\\", "/").strip("/")
-  p = os.path.normpath(p).replace("\\", "/")
-  if p == ".":
-    p = ""
-  if p.startswith("../") or p.startswith("..\\") or p == ".." or "/.." in p or ".." in p.split("/"):
-    raise ValueError("blocked path traversal")
-  return p
-
-def _join_user_cloud(root, username, relpath):
-  rel = _safe_rel(relpath)
-  base = os.path.join(root, "_cloud", username)
-  full = os.path.abspath(os.path.join(base, rel))
-  base_abs = os.path.abspath(base)
-  if not (full == base_abs or full.startswith(base_abs + os.sep)):
-    raise ValueError("blocked path")
-  return base, full
-
-def _fmt_item(path_abs, base_abs, is_dir):
-  st = os.stat(path_abs)
-  rel = os.path.relpath(path_abs, base_abs).replace("\\", "/")
-  if rel == ".":
-    rel = ""
-  name = os.path.basename(path_abs) if rel else ""
-  return {
-    "name": name,
-    "path": rel,
-    "type": "dir" if is_dir else "file",
-    "size": 0 if is_dir else int(st.st_size),
-    "mtime": int(st.st_mtime * 1000),
+async function runCode(){
+  setStatus('Läuft ...');
+  out.textContent = '';
+  try{
+    const res = await fetch('/__nc_exec__', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({code: codeEl.value, path: pathEl.value || 'browser_demo.nc'})
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok){
+      out.textContent = data.error || ('HTTP ' + res.status);
+      setStatus('Fehler', 'err');
+      return;
+    }
+    out.textContent = data.output || '';
+    setStatus('Fertig', 'ok');
+  }catch(e){
+    out.textContent = String(e && e.message ? e.message : e);
+    setStatus('Fehler', 'err');
   }
+}
 
-def _b64_chunks_from_file(fp, chunk_bytes=200_000):
-  # returns list[str] of base64 chunks
-  chunks = []
-  with open(fp, "rb") as f:
-    while True:
-      b = f.read(chunk_bytes)
-      if not b:
-        break
-      chunks.append(base64.b64encode(b).decode("ascii"))
-  return chunks
+document.getElementById('runBtn').addEventListener('click', runCode);
+document.getElementById('sampleBtn').addEventListener('click', () => {
+  codeEl.value = 'print "NC Browser Demo"\nlet n = 3\nrepeat n:\n  print "Zeile", n';
+});
+codeEl.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') runCode();
+});
+</script>
+</body>
+</html>
+"""
 
-# ----------------------------
-# Server
-# ----------------------------
+
+def _safe_join(root: str, rel: str) -> str:
+    rel = rel.lstrip("/").replace("\\", "/")
+    rel = os.path.normpath(rel)
+    full = os.path.abspath(os.path.join(root, rel))
+    root_abs = os.path.abspath(root)
+    if not full.startswith(root_abs + os.sep) and full != root_abs:
+        raise ValueError("blocked path traversal")
+    return full
+
+
+def _blocked_nc_text(code: str) -> str | None:
+    checks = [
+        (r"(^|\n)\s*import\s+py\b", "NC Browser Runner blockiert 'import py'."),
+        (r"\bpy\s*\.", "NC Browser Runner blockiert die Python-Bridge 'py.'."),
+        (r"(^|\n)\s*import\s+package\b", "NC Browser Runner blockiert 'import package'."),
+        (r"(^|\n)\s*import\s+pkg\b", "NC Browser Runner blockiert 'import pkg'."),
+    ]
+    for pattern, message in checks:
+        if re.search(pattern, code, flags=re.IGNORECASE):
+            return message
+    return None
+
+
+def _build_search_paths(project_root: str) -> list[str]:
+    return [
+        project_root,
+        os.path.join(project_root, "libs"),
+        os.path.join(project_root, "api"),
+        os.path.join(project_root, "api", "libs"),
+        os.path.join(project_root, "www"),
+        os.path.join(project_root, "www", "libs"),
+    ]
+
+
+def _run_nc_text_capture(nc_text: str, project_root: str, source_name: str = "<text>") -> tuple[str, dict]:
+    import io
+    import contextlib
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        nc.run_text(
+            nc_text,
+            base=project_root,
+            extra_paths=_build_search_paths(project_root),
+            policy=nc.NCPolicy(
+                allow_http=False,
+                allow_private_hosts=True,
+                data_dir=os.path.join(project_root, "_data"),
+            ),
+            enable_ui=False,
+            source_name=source_name,
+        )
+    return buf.getvalue(), {"source": source_name}
+
+
+def _run_nc_file(path: str, request_obj: dict, project_root: str) -> tuple[int, dict, bytes]:
+    injected = f'let request = {json.dumps(request_obj, ensure_ascii=False)}\n'
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        code = f.read()
+    text = injected + "\n" + code
+
+    output, _meta = _run_nc_text_capture(text, project_root=project_root, source_name=path)
+    out = output.splitlines()
+
+    status = 200
+    headers = {"Content-Type": "text/html; charset=utf-8"}
+    body_lines = out
+
+    if out and out[0].startswith("__HTTP__"):
+        meta_raw = out[0][len("__HTTP__"):].strip()
+        try:
+            meta = json.loads(meta_raw)
+            status = int(meta.get("status", 200))
+            h = meta.get("headers", {})
+            if isinstance(h, dict):
+                for k, v in h.items():
+                    headers[str(k)] = str(v)
+            body_lines = out[1:]
+        except Exception:
+            pass
+
+    body = ("\n".join(body_lines)).encode("utf-8", errors="replace")
+    return status, headers, body
+
 
 class Handler(BaseHTTPRequestHandler):
-  server_version = "TCloudNC/2.0"
+    server_version = "NCServer/1.3"
 
-  def do_OPTIONS(self):
-    self.send_response(204)
-    self.send_header("Access-Control-Allow-Origin", "*")
-    self.send_header("Access-Control-Allow-Headers", "Content-Type")
-    self.send_header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
-    self.end_headers()
+    def do_GET(self):
+        self._handle()
 
-  def do_GET(self):
-    self._handle()
+    def do_POST(self):
+        self._handle()
 
-  def do_POST(self):
-    self._handle()
+    def do_DELETE(self):
+        self._handle()
 
-  def _handle(self):
-    root = self.server.root_dir
-
-    data_dir = os.path.join(root, "_data")
-    users_p = os.path.join(data_dir, "users.json")
-    sess_p  = os.path.join(data_dir, "sessions.json")
-    share_p = os.path.join(data_dir, "shares.json")
-    os.makedirs(data_dir, exist_ok=True)
-
-    users = _json_load(users_p, {"users": []})
-    sessions = _json_load(sess_p, {"sessions": {}})
-    shares = _json_load(share_p, {"shares": {}})
-
-    parsed = urllib.parse.urlparse(self.path)
-    path = parsed.path or "/"
-    qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-    q = {k: (v[0] if len(v) == 1 else v) for k, v in qs.items()}
-
-    # auth via cookie
-    cookies = _cookie_parse(self.headers.get("Cookie", ""))
-    sid = cookies.get("tcloud_sid")
-    sess = sessions["sessions"].get(sid) if sid else None
-    username = sess.get("username") if isinstance(sess, dict) else None
-
-    def find_user(u):
-      for x in users["users"]:
-        if x.get("username") == u:
-          return x
-      return None
-
-    def is_admin(u):
-      usr = find_user(u)
-      return bool(usr and usr.get("is_admin"))
-
-    # -------------------------
-    # API: /api/*.nc
-    # -------------------------
-
-    # NOTE: IMPORTANT for your old app.js:
-    # /api/me.nc MUST return 200 even when not logged in.
-    if path == "/api/me.nc":
-      if not username:
-        return _send_json(self, 200, {"logged_in": False})
-      usr = find_user(username)
-      return _send_json(self, 200, {
-        "logged_in": True,
-        "username": username,
-        "is_admin": bool(usr and usr.get("is_admin")),
-      })
-
-    if path == "/api/register.nc":
-      body = _read_body_json(self)
-      u = (body.get("username") or "").strip()
-      p = (body.get("password") or "")
-      if not u or not p:
-        return _send_json(self, 400, {"error": "username/password fehlen"})
-
-      if find_user(u):
-        return _send_json(self, 409, {"error": "User existiert bereits"})
-
-      # first account becomes admin
-      first = (len(users["users"]) == 0)
-      users["users"].append({
-        "username": u,
-        "pw": _hash_pw(p),
-        "is_admin": first,
-        "quota": 0,  # 0 = unlimited by default (you can change later)
-      })
-      _json_save(users_p, users)
-      return _send_json(self, 200, {"ok": True})
-
-    if path == "/api/login.nc":
-      body = _read_body_json(self)
-      u = (body.get("username") or "").strip()
-      p = (body.get("password") or "")
-      usr = find_user(u)
-      if (not usr) or (not _verify_pw(p, usr.get("pw", {}))):
-        return _send_json(self, 401, {"error": "login failed"})
-
-      # create session
-      sid_new = secrets.token_urlsafe(32)
-      sessions["sessions"][sid_new] = {
-        "username": u,
-        "ts": int(time.time() * 1000),
-      }
-      _json_save(sess_p, sessions)
-
-      self.send_response(200)
-      _cookie_set(self, "tcloud_sid", sid_new, max_age=60*60*24*7)  # 7 days
-      self.send_header("Content-Type", "application/json; charset=utf-8")
-      self.send_header("Cache-Control", "no-store")
-      self.end_headers()
-      self.wfile.write(json.dumps({"ok": True}, ensure_ascii=False).encode("utf-8"))
-      return
-
-    if path == "/api/logout.nc":
-      # delete session cookie + session record
-      if sid and sid in sessions["sessions"]:
-        del sessions["sessions"][sid]
-        _json_save(sess_p, sessions)
-
-      self.send_response(200)
-      _cookie_clear(self, "tcloud_sid")
-      self.send_header("Content-Type", "application/json; charset=utf-8")
-      self.end_headers()
-      self.wfile.write(json.dumps({"ok": True}, ensure_ascii=False).encode("utf-8"))
-      return
-
-    # from here: must be logged in (except share)
-    if path.startswith("/api/") and path not in ("/api/share.nc",):
-      if not username:
-        return _send_json(self, 401, {"error": "not logged in"})
-
-    # ---------- Cloud ops ----------
-    if path == "/api/list.nc":
-      rel = q.get("path", "") or ""
-      try:
-        base, full = _join_user_cloud(root, username, rel)
-      except Exception:
-        return _send_json(self, 400, {"error": "bad path"})
-
-      os.makedirs(base, exist_ok=True)
-      os.makedirs(full, exist_ok=True)
-
-      items = []
-      try:
-        for name in sorted(os.listdir(full), key=lambda s: s.lower()):
-          p = os.path.join(full, name)
-          is_dir = os.path.isdir(p)
-          it = _fmt_item(p, base, is_dir)
-          # fix name for root listings
-          it["name"] = name
-          items.append(it)
-      except Exception as e:
-        return _send_json(self, 500, {"error": str(e)})
-
-      # response expects data.path + items
-      # path should be rel normalized
-      try:
-        rel_norm = _safe_rel(rel)
-      except Exception:
-        rel_norm = ""
-      return _send_json(self, 200, {"path": rel_norm, "items": items})
-
-    if path == "/api/mkdir.nc":
-      body = _read_body_json(self)
-      rel = (body.get("path") or "").strip()
-      try:
-        base, full = _join_user_cloud(root, username, rel)
-      except Exception:
-        return _send_json(self, 400, {"error": "bad path"})
-      try:
-        os.makedirs(full, exist_ok=True)
-        return _send_json(self, 200, {"ok": True})
-      except Exception as e:
-        return _send_json(self, 500, {"error": str(e)})
-
-    if path == "/api/rename.nc":
-      body = _read_body_json(self)
-      oldp = (body.get("old_path") or "").strip()
-      newp = (body.get("new_path") or "").strip()
-      try:
-        base, old_full = _join_user_cloud(root, username, oldp)
-        _base2, new_full = _join_user_cloud(root, username, newp)
-      except Exception:
-        return _send_json(self, 400, {"error": "bad path"})
-      try:
-        os.makedirs(os.path.dirname(new_full), exist_ok=True)
-        os.replace(old_full, new_full)
-        return _send_json(self, 200, {"ok": True})
-      except Exception as e:
-        return _send_json(self, 500, {"error": str(e)})
-
-    if path == "/api/delete.nc":
-      body = _read_body_json(self)
-      rel = (body.get("path") or "").strip()
-      try:
-        base, full = _join_user_cloud(root, username, rel)
-      except Exception:
-        return _send_json(self, 400, {"error": "bad path"})
-      try:
-        if os.path.isdir(full):
-          # delete dir recursively
-          for rootp, dirs, files in os.walk(full, topdown=False):
-            for fn in files:
-              os.remove(os.path.join(rootp, fn))
-            for dn in dirs:
-              os.rmdir(os.path.join(rootp, dn))
-          os.rmdir(full)
-        else:
-          os.remove(full)
-        return _send_json(self, 200, {"ok": True})
-      except FileNotFoundError:
-        return _send_json(self, 404, {"error": "not found"})
-      except Exception as e:
-        return _send_json(self, 500, {"error": str(e)})
-
-    if path == "/api/upload.nc":
-      body = _read_body_json(self)
-      rel_dir = (body.get("path") or "").strip()   # current dir
-      name = (body.get("name") or "").strip()
-      b64 = body.get("b64") or ""
-      mime = (body.get("mime") or "application/octet-stream").strip()
-      overwrite = bool(body.get("overwrite"))
-
-      if not name:
-        return _send_json(self, 400, {"error": "missing name"})
-      # block weird names
-      if "/" in name or "\\" in name or name in (".", ".."):
-        return _send_json(self, 400, {"error": "bad filename"})
-
-      try:
-        base, dir_full = _join_user_cloud(root, username, rel_dir)
-      except Exception:
-        return _send_json(self, 400, {"error": "bad path"})
-
-      os.makedirs(dir_full, exist_ok=True)
-      fp = os.path.join(dir_full, name)
-      if (not overwrite) and os.path.exists(fp):
-        return _send_json(self, 409, {"error": "file exists (overwrite=false)"})
-
-      try:
-        raw = base64.b64decode(b64.encode("ascii"), validate=False)
-      except Exception:
-        return _send_json(self, 400, {"error": "bad base64"})
-
-      try:
-        with open(fp, "wb") as f:
-          f.write(raw)
-        # store meta sidecar (optional)
-        meta = {"mime": mime, "size": len(raw), "mtime": int(time.time()*1000)}
-        _json_save(fp + ".meta.json", meta)
-        return _send_json(self, 200, {"ok": True})
-      except Exception as e:
-        return _send_json(self, 500, {"error": str(e)})
-
-    # download: meta + chunks
-    # app.js expects:
-    #   GET /api/file_meta.nc?path=...
-    #   GET /api/file_chunk.nc?id=...&i=...
-    if path == "/api/file_meta.nc":
-      rel = q.get("path", "") or ""
-      try:
-        base, full = _join_user_cloud(root, username, rel)
-      except Exception:
-        return _send_json(self, 400, {"error": "bad path"})
-
-      if not os.path.isfile(full):
-        return _send_json(self, 404, {"error": "not found"})
-
-      # create an ID in memory mapping in sessions.json (simple & persistent)
-      # we store file mappings under sessions["files"][sid]
-      if not sid:
-        return _send_json(self, 401, {"error": "no session"})
-      sessions = _json_load(sess_p, {"sessions": {}})
-      srec = sessions["sessions"].get(sid)
-      if not isinstance(srec, dict):
-        return _send_json(self, 401, {"error": "no session"})
-      srec.setdefault("files", {})
-      fid = secrets.token_urlsafe(16)
-      srec["files"][fid] = {"path": rel, "ts": int(time.time()*1000)}
-      sessions["sessions"][sid] = srec
-      _json_save(sess_p, sessions)
-
-      ctype, _ = mimetypes.guess_type(full)
-      ctype = ctype or "application/octet-stream"
-
-      # size -> estimate chunks: chunk_bytes base64 will inflate; but we chunk raw bytes
-      st = os.stat(full)
-      chunk_bytes = 200_000
-      chunks = (st.st_size + chunk_bytes - 1) // chunk_bytes
-
-      meta = {
-        "id": fid,
-        "name": os.path.basename(full),
-        "mime": ctype,
-        "size": int(st.st_size),
-        "chunks": int(chunks),
-      }
-      return _send_json(self, 200, {"meta": meta})
-
-    if path == "/api/file_chunk.nc":
-      if not sid:
-        return _send_json(self, 401, {"error": "no session"})
-      fid = (q.get("id") or "").strip()
-      idx = int(q.get("i") or 0)
-
-      sessions = _json_load(sess_p, {"sessions": {}})
-      srec = sessions["sessions"].get(sid)
-      if not isinstance(srec, dict):
-        return _send_json(self, 401, {"error": "no session"})
-      fmap = (srec.get("files") or {})
-      frec = fmap.get(fid)
-      if not isinstance(frec, dict):
-        return _send_json(self, 404, {"error": "bad id"})
-      rel = frec.get("path") or ""
-
-      try:
-        base, full = _join_user_cloud(root, username, rel)
-      except Exception:
-        return _send_json(self, 400, {"error": "bad path"})
-      if not os.path.isfile(full):
-        return _send_json(self, 404, {"error": "not found"})
-
-      chunk_bytes = 200_000
-      try:
-        with open(full, "rb") as f:
-          f.seek(idx * chunk_bytes)
-          raw = f.read(chunk_bytes)
-        b64 = base64.b64encode(raw).decode("ascii")
-        return _send_json(self, 200, {"b64": b64})
-      except Exception as e:
-        return _send_json(self, 500, {"error": str(e)})
-
-    # share
-    if path == "/api/share_create.nc":
-      body = _read_body_json(self)
-      rel = (body.get("path") or "").strip()
-      ttl_ms = int(body.get("ttl_ms") or 3600000)
-
-      # must exist
-      try:
-        base, full = _join_user_cloud(root, username, rel)
-      except Exception:
-        return _send_json(self, 400, {"error": "bad path"})
-      if not os.path.exists(full):
-        return _send_json(self, 404, {"error": "not found"})
-
-      token = secrets.token_urlsafe(24)
-      shares["shares"][token] = {
-        "owner": username,
-        "path": rel,
-        "exp": int(time.time()*1000) + max(10_000, ttl_ms),
-      }
-      _json_save(share_p, shares)
-      return _send_json(self, 200, {"ok": True, "token": token})
-
-    if path == "/api/share.nc":
-      token = (q.get("token") or "").strip()
-      rec = shares["shares"].get(token)
-      if not isinstance(rec, dict):
-        return _send_json(self, 404, {"error": "bad token"})
-      if int(time.time()*1000) > int(rec.get("exp") or 0):
-        return _send_json(self, 410, {"error": "expired"})
-
-      owner = rec.get("owner")
-      rel = rec.get("path") or ""
-      try:
-        base, full = _join_user_cloud(root, owner, rel)
-      except Exception:
-        return _send_json(self, 400, {"error": "bad path"})
-      if not os.path.isfile(full):
-        return _send_json(self, 404, {"error": "not found"})
-
-      # send as file download (not chunked)
-      ctype, _ = mimetypes.guess_type(full)
-      ctype = ctype or "application/octet-stream"
-      try:
-        with open(full, "rb") as f:
-          data = f.read()
-        self.send_response(200)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Content-Disposition", f'attachment; filename="{os.path.basename(full)}"')
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
-        self.wfile.write(data)
-        return
-      except Exception as e:
-        return _send_json(self, 500, {"error": str(e)})
 
-    # admin
-    if path == "/api/admin_users.nc":
-      if not username or not is_admin(username):
-        return _send_json(self, 403, {"error": "admin only"})
-      safe = []
-      for u in users["users"]:
-        safe.append({
-          "username": u.get("username"),
-          "is_admin": bool(u.get("is_admin")),
-          "quota": int(u.get("quota") or 0),
-        })
-      return _send_json(self, 200, {"users": safe})
+    def _send_bytes(self, status: int, body: bytes, content_type: str = "text/plain; charset=utf-8", extra_headers: dict | None = None):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(str(k), str(v))
+        self.end_headers()
+        self.wfile.write(body)
 
-    if path == "/api/admin_set_quota.nc":
-      if not username or not is_admin(username):
-        return _send_json(self, 403, {"error": "admin only"})
-      body = _read_body_json(self)
-      u = (body.get("username") or "").strip()
-      qv = int(body.get("quota") or 0)
-      usr = find_user(u)
-      if not usr:
-        return _send_json(self, 404, {"error": "user not found"})
-      usr["quota"] = max(0, qv)
-      _json_save(users_p, users)
-      return _send_json(self, 200, {"ok": True})
+    def _send_json(self, status: int, data: dict):
+        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self._send_bytes(status, payload, "application/json; charset=utf-8")
 
-    # unknown api -> 404
-    if path.startswith("/api/"):
-      return _send_json(self, 404, {"error": "unknown api"})
+    def _parse_request_body(self) -> tuple[bytes, str, dict | None, dict | None]:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length > MAX_BODY_BYTES:
+            raise ValueError(f"Request body too large ({length} bytes)")
+        body = self.rfile.read(length) if length > 0 else b""
+        ctype = (self.headers.get("Content-Type", "") or "").lower()
+        body_text = body.decode("utf-8", errors="replace")
 
-    # -------------------------
-    # Static files (index.html, /static/*, etc.)
-    # -------------------------
-    req_path = path
-    if req_path == "/":
-      req_path = "/index.html"
-    fs_path = os.path.abspath(os.path.join(root, req_path.lstrip("/")))
-    root_abs = os.path.abspath(root)
-    if not (fs_path == root_abs or fs_path.startswith(root_abs + os.sep)):
-      return self.send_error(403)
+        req_json = None
+        req_form = None
 
-    if os.path.isdir(fs_path):
-      idx = os.path.join(fs_path, "index.html")
-      if os.path.isfile(idx):
-        fs_path = idx
-      else:
-        return self.send_error(404)
+        if "application/json" in ctype:
+            try:
+                req_json = json.loads(body_text) if body_text.strip() else None
+            except Exception:
+                req_json = None
 
-    if not os.path.isfile(fs_path):
-      return self.send_error(404)
+        if "application/x-www-form-urlencoded" in ctype:
+            try:
+                qs2 = urllib.parse.parse_qs(body_text, keep_blank_values=True)
+                req_form = {k: (v[0] if len(v) == 1 else v) for k, v in qs2.items()}
+            except Exception:
+                req_form = None
 
-    ctype, _ = mimetypes.guess_type(fs_path)
-    ctype = ctype or "application/octet-stream"
-    try:
-      with open(fs_path, "rb") as f:
-        data = f.read()
-      self.send_response(200)
-      self.send_header("Content-Type", ctype)
-      self.send_header("Content-Length", str(len(data)))
-      self.end_headers()
-      self.wfile.write(data)
-    except Exception:
-      self.send_error(500)
+        return body, body_text, req_json, req_form
+
+    def _handle_exec_api(self, project_root: str, req_json: dict | None):
+        payload = req_json if isinstance(req_json, dict) else {}
+        code = payload.get("code", "")
+        source_name = payload.get("path", "browser_demo.nc") or "browser_demo.nc"
+        if not isinstance(code, str):
+            self._send_json(400, {"ok": False, "error": "'code' muss ein String sein."})
+            return
+        if not code.strip():
+            self._send_json(400, {"ok": False, "error": "Kein NC-Code gesendet."})
+            return
+        if len(code.encode("utf-8")) > MAX_CODE_BYTES:
+            self._send_json(413, {"ok": False, "error": f"NC-Code ist zu groß (max {MAX_CODE_BYTES} Bytes)."})
+            return
+        blocked = _blocked_nc_text(code)
+        if blocked:
+            self._send_json(400, {"ok": False, "error": blocked})
+            return
+        try:
+            output, meta = _run_nc_text_capture(code, project_root=project_root, source_name=str(source_name))
+            self._send_json(200, {"ok": True, "output": output, "meta": meta})
+        except Exception as e:
+            self._send_json(500, {"ok": False, "error": f"NC ERROR: {e}"})
+
+    def _handle(self):
+        root = self.server.root_dir
+        parsed = urllib.parse.urlparse(self.path)
+        url_path = parsed.path or "/"
+
+        try:
+            body, body_text, req_json, req_form = self._parse_request_body()
+        except ValueError as e:
+            self._send_json(413, {"ok": False, "error": str(e)})
+            return
+
+        if url_path == "/__nc_playground" and self.command == "GET":
+            self._send_bytes(200, PLAYGROUND_HTML.encode("utf-8"), "text/html; charset=utf-8")
+            return
+
+        if url_path == "/__nc_exec__" and self.command == "POST":
+            self._handle_exec_api(project_root=root, req_json=req_json)
+            return
+
+        if url_path.startswith("/api/"):
+            rel_fs = url_path.lstrip("/")
+        else:
+            rel_fs = os.path.join("www", url_path.lstrip("/"))
+
+        try:
+            full = _safe_join(root, rel_fs)
+        except Exception:
+            self.send_error(403)
+            return
+
+        qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        query = {k: (v[0] if len(v) == 1 else v) for k, v in qs.items()}
+
+        req_obj = {
+            "method": self.command,
+            "path": url_path,
+            "query": query,
+            "headers": {k: v for k, v in self.headers.items()},
+            "body": body_text,
+            "json": req_json,
+            "form": req_form,
+        }
+
+        if os.path.isdir(full):
+            idx = os.path.join(full, "index.html")
+            if os.path.isfile(idx):
+                full = idx
+            else:
+                self.send_error(404)
+                return
+
+        if full.lower().endswith(".nc") and os.path.isfile(full):
+            try:
+                status, headers, resp = _run_nc_file(full, req_obj, project_root=root)
+                self._send_bytes(status, resp, headers.pop("Content-Type", "text/html; charset=utf-8"), headers)
+            except Exception as e:
+                self._send_bytes(500, ("NC ERROR: " + str(e)).encode("utf-8", errors="replace"))
+            return
+
+        if os.path.isfile(full):
+            ctype2, _ = mimetypes.guess_type(full)
+            if (ctype2 or "").startswith("text/") and "charset=" not in (ctype2 or ""):
+                ctype2 = (ctype2 or "text/plain") + "; charset=utf-8"
+            ctype2 = ctype2 or "application/octet-stream"
+            try:
+                with open(full, "rb") as f:
+                    data = f.read()
+                self._send_bytes(200, data, ctype2)
+            except Exception:
+                self.send_error(500)
+            return
+
+        self.send_error(404)
+
 
 def main():
-  root = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
-  port = int(sys.argv[2]) if len(sys.argv) > 2 else 5000
+    root = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+    host = DEFAULT_HOST
+    port = int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_PORT
 
-  root = os.path.abspath(root)
-  os.makedirs(os.path.join(root, "_data"), exist_ok=True)
-  os.makedirs(os.path.join(root, "_cloud"), exist_ok=True)
+    httpd = ThreadingHTTPServer((host, port), Handler)
+    httpd.root_dir = os.path.abspath(root)
 
-  httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-  httpd.root_dir = root
-  print(f"Server läuft: http://127.0.0.1:{port}/  (root={root})")
-  httpd.serve_forever()
+    print(f"NC server running: http://{host}:{port}/  (root={httpd.root_dir})")
+    print("Routes: / -> www/, /api/* -> api/*")
+    print("Extra: /__nc_playground + POST /__nc_exec__")
+    print("Data dir: _data/ (json.save/load)")
+    httpd.serve_forever()
+
 
 if __name__ == "__main__":
-  main()
+    main()
