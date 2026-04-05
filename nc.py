@@ -4574,8 +4574,18 @@ class NCInterpreter:
             }
             if kind == "checkmark":
                 var_name = str(st.data.get("name") or "")
-                if var_name and var_name not in env:
-                    env[var_name] = False
+                # Bugfix:
+                # Checkmark variables must be real booleans.
+                # Names like "sound" can already exist in base_env as builtin modules
+                # (for example env["sound"] = self._sound_module_object()).
+                # In that case the old code kept the module object, which caused:
+                # - checkmarks to appear pre-checked
+                # - `if sound is on:` to behave wrongly
+                # - json.save(...) to fail with "_M is not JSON serializable"
+                if var_name:
+                    existing = env.get(var_name, False)
+                    if not isinstance(existing, bool):
+                        env[var_name] = False
                 item["name"] = var_name
                 item["checked"] = bool(env.get(var_name, False))
             else:
@@ -4874,8 +4884,10 @@ class NCInterpreter:
 
         if k == "checkmark":
             name = str(d.get("name") or "")
-            if name and name not in env:
-                env[name] = False
+            if name:
+                existing = env.get(name, False)
+                if not isinstance(existing, bool):
+                    env[name] = False
             return
 
         # UI
