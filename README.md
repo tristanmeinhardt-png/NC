@@ -673,30 +673,6 @@ import json
 
 print "Welcome to NC Demo"
 
-(sound) = checkmark "Sound" color "green"
-(music) = checkmark "Music" color "cyan"
-(hardmode) = checkmark "Hard Mode" color "red"
-
-button "Show Settings":
-  action:
-    show_settings()
-
-button "Play":
-  action:
-    play_game()
-
-button "Repeat Demo":
-  action:
-    repeat_demo()
-
-button "Save Settings":
-  action:
-    save_settings()
-
-button "Exit":
-  action:
-    print "Program ended"
-
 fn show_settings():
   if sound is on:
     print "Sound: ON"
@@ -721,12 +697,49 @@ fn play_game():
     print "Normal difficulty"
 
 fn repeat_demo():
-  repeat 3 times:
+  repeat 3:
     print "Repeat block running"
 
 fn save_settings():
   json.save("demo_settings", {"sound": sound, "music": music, "hardmode": hardmode})
   print "Settings saved"
+
+let data = json.load("demo_settings", {})
+let sound = False
+let music = False
+let hardmode = False
+
+if "sound" in data:
+  set sound = data["sound"]
+if "music" in data:
+  set music = data["music"]
+if "hardmode" in data:
+  set hardmode = data["hardmode"]
+
+(sound) = checkmark "Sound" color "green"
+(music) = checkmark "Music" color "cyan"
+(hardmode) = checkmark "Hard Mode" color "red"
+
+button "Show Settings":
+  action:
+    show_settings()
+
+button "Play":
+  action:
+    play_game()
+
+button "Repeat Demo":
+  action:
+    repeat_demo()
+
+button "Save Settings":
+  action:
+    save_settings()
+
+button "Exit":
+  action:
+    print "Program ended"
+
 ```
 
 # Structure explanation
