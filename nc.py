@@ -1116,6 +1116,10 @@ class NCReturn(Exception):
         self.value = value
 
 
+class NCEnd(Exception):
+    pass
+
+
 @dataclass
 class NCFn:
     name: str
