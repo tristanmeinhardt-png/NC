@@ -20,6 +20,15 @@ NC is focused on:
 - AI programming
 
 ---
+# Why should I use NC?
+## NC is a simple scripting language built on Python that makes console apps easier to write, read, and share.
+
+### Think of NC as:
+- simpler Python for CLI apps
+- scripting language with built-in UI elements
+- fast prototyping language
+- beginner-friendly syntax
+---
 
 ## Windows only
 
