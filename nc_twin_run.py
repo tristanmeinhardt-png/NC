@@ -1088,7 +1088,8 @@ if HERE not in sys.path:
 import {module_name} as twin
 
 if __name__ == "__main__":
-    raise SystemExit(twin.main([{src_path!r}]))
+    _forward = sys.argv[1:] if len(sys.argv) > 1 else [{src_path!r}]
+    raise SystemExit(twin.main(_forward))
 '''
 
     with tempfile.TemporaryDirectory(prefix="nc_twin_exe_") as tmp:
@@ -1097,12 +1098,19 @@ if __name__ == "__main__":
         cmd = pyinstaller_cmd + [
             "--noconfirm",
             "--clean",
-            "--onefile",
+            "--onedir",
             "--windowed",
             "--name", exe_name,
             "--distpath", str(output_root / "dist"),
             "--workpath", str(output_root / "build"),
             "--specpath", str(output_root / "spec"),
+            "--collect-submodules", "PySide6",
+            "--collect-submodules", "PySide6.QtWebEngineCore",
+            "--collect-submodules", "PySide6.QtWebEngineWidgets",
+            "--collect-submodules", "PySide6.QtWebChannel",
+            "--collect-submodules", "PySide6.QtMultimedia",
+            "--collect-submodules", "PySide6.QtMultimediaWidgets",
+            "--collect-data", "PySide6",
         ]
         for hidden in hidden_imports:
             cmd.extend(["--hidden-import", hidden])
@@ -1119,24 +1127,10 @@ if __name__ == "__main__":
                 ) from None
             raise RuntimeError(details)
 
-    exe_path = output_root / "dist" / f"{exe_name}.exe"
+    exe_path = output_root / "dist" / exe_name / f"{exe_name}.exe"
     if not exe_path.is_file():
         raise RuntimeError(f"Build finished but EXE was not found: {exe_path}")
     return str(exe_path)
-
-
-def _run_nc_child(child_argv: list[str]) -> int:
-    import nc_console
-    return int(nc_console.main(list(child_argv)))
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="ncw", add_help=True)
-    p.add_argument("target", nargs="?", help="Path to .nc file or URL to .nc")
-    p.add_argument("--base", default=None, help="Base folder/URL for resolving relative imports")
-    p.add_argument("--libs", action="append", default=[], help="Extra library search path (repeatable)")
-    p.add_argument("--exe", action="store_true", help="Build the local .nc file into a Windows .exe that launches the TWIN GUI host")
-    return p
 
 
 def main(argv: list[str] | None = None) -> int:
