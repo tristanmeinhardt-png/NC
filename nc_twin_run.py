@@ -449,6 +449,32 @@ class TwinWindow(QMainWindow):
         lay.addWidget(self.tabs, 1)
         self.setCentralWidget(root)
 
+        # HTML-only mode bugfix:
+        # If a window is mainly used for content_html/ui.html_set(...),
+        # the user may want to see only the rendered HTML without the
+        # category tabs above it.
+        self._html_only_mode = False
+        try:
+            self.tabs.tabBar().setVisible(True)
+        except Exception:
+            pass
+
+    def _set_html_only_mode(self, enabled: bool):
+        self._html_only_mode = bool(enabled)
+        try:
+            self.header.setVisible(not enabled)
+        except Exception:
+            pass
+        try:
+            self.tabs.tabBar().setVisible(not enabled)
+        except Exception:
+            pass
+        try:
+            if enabled:
+                self.tabs.setCurrentWidget(self.html)
+        except Exception:
+            pass
+
     def set_title(self, title: str):
         self.setWindowTitle(title)
         self.header.setText(f"NC Window: {title}")
@@ -457,10 +483,12 @@ class TwinWindow(QMainWindow):
         self.log.append(str(text))
 
     def add_plot_point(self, series: str, step: int, value: float):
+        self._set_html_only_mode(False)
         self.plot_canvas.add_point(series, step, value)
         self.tabs.setCurrentIndex(self.tabs.indexOf(self.plot_canvas.parentWidget()))
 
     def set_table(self, name: str, rows: list):
+        self._set_html_only_mode(False)
         key = str(name or "table")
         norm_rows: list[list[object]] = []
         for r in rows or []:
@@ -492,6 +520,7 @@ class TwinWindow(QMainWindow):
             self.html.setHtml(doc)
         else:
             self.html.setHtml(doc)
+        self._set_html_only_mode(True)
         self.tabs.setCurrentIndex(self.tabs.indexOf(self.html))
 
     def eval_js(self, code: str):
@@ -504,6 +533,7 @@ class TwinWindow(QMainWindow):
             self.append_log("[js.eval] QtWebEngine not available")
 
     def ui2_set_scene(self, scene: dict):
+        self._set_html_only_mode(False)
         try:
             while self.ui2_lay.count():
                 item = self.ui2_lay.takeAt(0)
