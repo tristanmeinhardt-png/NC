@@ -17,6 +17,7 @@ NC is focused on:
 - optional GUI/TWIN output
 - optional EXE export
 - Windows-oriented workflows
+- AI programming
 
 ---
 
