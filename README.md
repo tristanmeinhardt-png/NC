@@ -689,12 +689,3 @@ PySide6
 PySide6-QtWebEngine
 ```
 
-## Good next files to add
-
-- `README.md`
-- `requirements.txt`
-- `LICENSE`
-- `examples/`
-- `docs/syntax.md`
-- `docs/tutorial.md`
-
