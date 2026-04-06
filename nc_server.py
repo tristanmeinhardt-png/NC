@@ -1,9 +1,18 @@
 import os
 import sys
 import re
+import io
 import json
+import time
+import queue
+import shutil
+import signal
+import zipfile
 import mimetypes
+import tempfile
+import threading
 import urllib.parse
+import subprocess
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 import nc
@@ -12,6 +21,9 @@ MAX_BODY_BYTES = 512_000
 MAX_CODE_BYTES = 200_000
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8080
+ALLOWED_IP = "192.168.2.105"
+UPLOADS_DIRNAME = "uploads"
+IPS_FILENAME = "ips.json"
 
 PLAYGROUND_HTML = """<!doctype html>
 <html lang="de">
@@ -53,7 +65,7 @@ PLAYGROUND_HTML = """<!doctype html>
   <div class="wrap">
     <div class="card">
       <h1>NC Browser Runner <span class="badge">NC only</span></h1>
-      <div class="muted">Führt nur NC-Code aus. Keine Python-Bridge, kein Python-Upload, kein Python-Start.</div>
+      <div class="muted">Führt NC-Code direkt aus. Für interaktive NC-Dateien gibt es zusätzlich die IP-Route unten.</div>
       <div class="row" style="margin-top:12px">
         <button id="runBtn" type="button">▶ Ausführen</button>
         <button id="saveBtn" class="ghost" type="button">💾 Im Browser speichern</button>
@@ -88,7 +100,7 @@ print "x + y =", x + y</textarea>
           <div id="status" class="small">Bereit</div>
         </div>
         <pre id="output"></pre>
-        <div class="small">Geblockt werden zusätzlich offensichtliche Python-Bridge-Aufrufe wie <code>import py</code>, <code>py.</code>, <code>import pkg</code> oder <code>import package</code>.</div>
+        <div class="small">Für interaktive NC-Dateien wie <code>input()</code> nutze <code>/ip/&lt;ip&gt;/&lt;datei.nc&gt;</code>.</div>
         <div class="examples">
           <div class="hint"><strong>Route:</strong><br><code>GET /__nc_playground</code></div>
           <div class="hint"><strong>API:</strong><br><code>POST /__nc_exec__</code></div>
@@ -98,8 +110,8 @@ print "x + y =", x + y</textarea>
   </div>
 
 <script>
-const STORAGE_KEY = 'nc_browser_runner_code_v2';
-const PATH_KEY = 'nc_browser_runner_path_v2';
+const STORAGE_KEY = 'nc_browser_runner_code_v3';
+const PATH_KEY = 'nc_browser_runner_path_v3';
 const out = document.getElementById('output');
 const statusEl = document.getElementById('status');
 const codeEl = document.getElementById('codeInput');
@@ -187,6 +199,73 @@ loadLocal();
 </html>
 """
 
+INTERACTIVE_HTML = """<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>NC Script Output</title>
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; background: #f6f6f6; color: #222; margin: 20px; }
+    .card { background: #fff; border: 1px solid #e0e0e0; border-radius: 10px; padding: 14px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+    #output { white-space: pre-wrap; font-family: Consolas, Monaco, monospace; font-size: 13px; max-height: 420px; overflow-y: auto; padding: 10px; border-radius: 8px; border: 1px solid #ddd; background: #ffffff; }
+    #textInput { width: 100%; max-width: 520px; padding: 10px; border-radius: 8px; border: 1px solid #ccc; margin-top: 10px; box-sizing: border-box; }
+    #history { margin-top: 12px; font-family: Consolas, Monaco, monospace; font-size: 13px; }
+    h2 { margin: 0 0 10px 0; }
+    .meta { color: #666; font-size: 13px; margin-bottom: 8px; }
+    .small { font-size: 12px; color:#777; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>📜 NC Script: __DATEINAME__</h2>
+    <div class="meta">Verbunden als: <strong>__IP__</strong> — Server: <strong>__ALLOWED_IP__:__PORT__</strong></div>
+    <div id="output"></div>
+    <form id="inputForm">
+      <input id="textInput" name="text" placeholder="Eingabe an das NC-Skript (ENTER zum Senden) ..." autocomplete="off" />
+    </form>
+    <div id="history" class="small"></div>
+  </div>
+
+  <script>
+    const form = document.getElementById('inputForm');
+    const input = document.getElementById('textInput');
+    const output = document.getElementById('output');
+    const historyDiv = document.getElementById('history');
+
+    async function updateOutput() {
+      try {
+        const resp = await fetch('/get_output');
+        const data = await resp.text();
+        output.innerText = data;
+        output.scrollTop = output.scrollHeight;
+
+        const respHist = await fetch('/get_history');
+        const histData = await respHist.json();
+        historyDiv.innerHTML = histData.map(h => '→ ' + h).join('<br>');
+      } catch (_e) {
+      }
+    }
+
+    setInterval(updateOutput, 500);
+    updateOutput();
+
+    form.addEventListener('submit', async function(e) {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = '';
+      await fetch('/input', {
+        method:'POST',
+        headers:{'Content-Type':'application/x-www-form-urlencoded'},
+        body:'text=' + encodeURIComponent(text)
+      });
+    });
+  </script>
+</body>
+</html>
+"""
+
 
 def _safe_join(root: str, rel: str) -> str:
     rel = rel.lstrip("/").replace("\\", "/")
@@ -223,7 +302,6 @@ def _build_search_paths(project_root: str) -> list[str]:
 
 
 def _run_nc_text_capture(nc_text: str, project_root: str, source_name: str = "<text>") -> tuple[str, dict]:
-    import io
     import contextlib
 
     buf = io.StringIO()
@@ -273,8 +351,160 @@ def _run_nc_file(path: str, request_obj: dict, project_root: str) -> tuple[int, 
     return status, headers, body
 
 
+class NCSession:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.current_process: subprocess.Popen[str] | None = None
+        self.current_output: list[str] = []
+        self.input_history: list[str] = []
+        self.current_script: str = ""
+        self.current_ip: str = ""
+        self.reader_thread: threading.Thread | None = None
+
+    def reset_buffers(self) -> None:
+        with self.lock:
+            self.current_output = []
+            self.input_history = []
+
+    def append_output(self, text: str) -> None:
+        with self.lock:
+            self.current_output.append(text)
+            if len(self.current_output) > 4000:
+                self.current_output = self.current_output[-4000:]
+
+    def get_output_text(self) -> str:
+        with self.lock:
+            return "".join(self.current_output)
+
+    def get_history(self) -> list[str]:
+        with self.lock:
+            return list(self.input_history)
+
+    def add_history(self, text: str) -> None:
+        with self.lock:
+            self.input_history.append(text)
+            if len(self.input_history) > 300:
+                self.input_history = self.input_history[-300:]
+
+    def stop_process(self) -> None:
+        proc = self.current_process
+        if not proc or proc.poll() is not None:
+            return
+        try:
+            proc.terminate()
+            proc.wait(timeout=1.5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+def _ips_path(root: str) -> str:
+    return os.path.join(root, IPS_FILENAME)
+
+
+def _uploads_dir(root: str) -> str:
+    return os.path.join(root, UPLOADS_DIRNAME)
+
+
+def _ensure_uploads(root: str) -> None:
+    os.makedirs(_uploads_dir(root), exist_ok=True)
+
+
+def _load_ips(root: str) -> dict:
+    path = _ips_path(root)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+            if not content:
+                return {}
+            return json.loads(content)
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _save_ips(root: str, ips: dict) -> None:
+    path = _ips_path(root)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(ips, f, indent=4, ensure_ascii=False)
+
+
+def _ensure_allowed_ip_registered(root: str) -> None:
+    ips = _load_ips(root)
+    if ALLOWED_IP not in ips:
+        ips[ALLOWED_IP] = {"datei": ""}
+        _save_ips(root, ips)
+
+
+def _safe_nc_filename(name: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_\-. ]+\.nc", name or "", flags=re.IGNORECASE))
+
+
+def _nc_console_path(root: str) -> str:
+    candidates = [
+        os.path.join(root, "nc_console.py"),
+        os.path.join(os.path.dirname(__file__), "nc_console.py"),
+    ]
+    for cand in candidates:
+        if os.path.isfile(cand):
+            return cand
+    raise FileNotFoundError("nc_console.py nicht gefunden")
+
+
+def _start_nc_script(session: NCSession, root: str, dateiname: str, ip: str) -> str | None:
+    if not _safe_nc_filename(dateiname):
+        return "Erlaubt sind nur .nc Dateien."
+
+    uploads_dir = _uploads_dir(root)
+    path = os.path.join(uploads_dir, dateiname)
+    if not os.path.isfile(path):
+        return f"Datei {dateiname} nicht gefunden!"
+
+    session.stop_process()
+    session.reset_buffers()
+    session.current_script = dateiname
+    session.current_ip = ip
+
+    try:
+        cmd = [sys.executable, "-u", _nc_console_path(root), path]
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            cwd=root,
+            env=dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1"),
+        )
+    except Exception as e:
+        return f"NC Prozess konnte nicht gestartet werden: {e}"
+
+    session.current_process = proc
+
+    def reader() -> None:
+        try:
+            assert proc.stdout is not None
+            while True:
+                line = proc.stdout.readline()
+                if line == "" and proc.poll() is not None:
+                    break
+                if line:
+                    session.append_output(line)
+        except Exception as e:
+            session.append_output(f"\n[Reader-Error] {e}\n")
+
+    t = threading.Thread(target=reader, daemon=True)
+    session.reader_thread = t
+    t.start()
+    return None
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "NCServer/1.4"
+    server_version = "NCServer/1.5"
 
     def do_GET(self):
         self._handle()
@@ -302,6 +532,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header(str(k), str(v))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_text(self, status: int, text: str, content_type: str = "text/plain; charset=utf-8"):
+        self._send_bytes(status, text.encode("utf-8", errors="replace"), content_type)
 
     def _send_json(self, status: int, data: dict):
         payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -356,6 +589,36 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._send_json(500, {"ok": False, "error": f"NC ERROR: {e}"})
 
+    def _handle_interactive_route(self, root: str, ip: str, dateiname: str):
+        session: NCSession = self.server.nc_session
+        ips = _load_ips(root)
+
+        if ip not in ips:
+            if ip == ALLOWED_IP:
+                ips[ip] = {"datei": dateiname}
+                _save_ips(root, ips)
+            else:
+                self._send_text(404, f"Datei {dateiname} für IP {ip} nicht gefunden!")
+                return
+
+        current_name = (ips.get(ip) or {}).get("datei", "")
+        if current_name != dateiname:
+            if ip == ALLOWED_IP:
+                ips[ip]["datei"] = dateiname
+                _save_ips(root, ips)
+            else:
+                self._send_text(404, f"Datei {dateiname} für IP {ip} nicht gefunden!")
+                return
+
+        if not session.current_process or session.current_process.poll() is not None or session.current_script != dateiname:
+            err = _start_nc_script(session, root, dateiname, ip)
+            if err:
+                self._send_text(404, err)
+                return
+
+        html = INTERACTIVE_HTML.replace("__DATEINAME__", dateiname).replace("__IP__", ip).replace("__ALLOWED_IP__", ALLOWED_IP).replace("__PORT__", str(self.server.server_port))
+        self._send_text(200, html, "text/html; charset=utf-8")
+
     def _handle(self):
         root = self.server.root_dir
         parsed = urllib.parse.urlparse(self.path)
@@ -384,6 +647,56 @@ class Handler(BaseHTTPRequestHandler):
                 "fields": ["code", "path"],
                 "max_code_bytes": MAX_CODE_BYTES,
             })
+            return
+
+        if url_path == "/get_output" and self.command == "GET":
+            session: NCSession = self.server.nc_session
+            self._send_text(200, session.get_output_text())
+            return
+
+        if url_path == "/get_history" and self.command == "GET":
+            session: NCSession = self.server.nc_session
+            self._send_json(200, session.get_history())
+            return
+
+        if url_path == "/input" and self.command == "POST":
+            session: NCSession = self.server.nc_session
+            text = ""
+            if isinstance(req_form, dict):
+                text = str(req_form.get("text", ""))
+            elif body_text:
+                text = body_text
+            text = text.rstrip("\r\n")
+            if text:
+                session.add_history(text)
+            proc = session.current_process
+            if proc and proc.poll() is None and proc.stdin:
+                try:
+                    proc.stdin.write(text + "\n")
+                    proc.stdin.flush()
+                except Exception:
+                    pass
+            self._send_bytes(204, b"", "text/plain; charset=utf-8")
+            return
+
+        m_register = re.fullmatch(r"/register/([^/]+)/([^/]+)", url_path)
+        if m_register and self.command in ("GET", "POST"):
+            ip = urllib.parse.unquote(m_register.group(1))
+            dateiname = urllib.parse.unquote(m_register.group(2))
+            if not _safe_nc_filename(dateiname):
+                self._send_text(400, "Nur .nc Dateien sind erlaubt.")
+                return
+            ips = _load_ips(root)
+            ips[ip] = {"datei": dateiname}
+            _save_ips(root, ips)
+            self._send_text(200, f"IP {ip} registriert mit Datei {dateiname}")
+            return
+
+        m_ip = re.fullmatch(r"/ip/([^/]+)/([^/]+)", url_path)
+        if m_ip and self.command == "GET":
+            ip = urllib.parse.unquote(m_ip.group(1))
+            dateiname = urllib.parse.unquote(m_ip.group(2))
+            self._handle_interactive_route(root, ip, dateiname)
             return
 
         if url_path.startswith("/api/"):
@@ -447,14 +760,28 @@ def main():
     host = DEFAULT_HOST
     port = int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_PORT
 
+    root = os.path.abspath(root)
+    _ensure_uploads(root)
+    _ensure_allowed_ip_registered(root)
+
     httpd = ThreadingHTTPServer((host, port), Handler)
-    httpd.root_dir = os.path.abspath(root)
+    httpd.root_dir = root
+    httpd.nc_session = NCSession()
 
     print(f"NC server running: http://{host}:{port}/  (root={httpd.root_dir})")
     print("Routes: / -> www/, /api/* -> api/*")
     print("Extra: /__nc_playground + POST /__nc_exec__")
+    print(f"Interactive: /ip/{ALLOWED_IP}/dein_script.nc")
+    print(f"Uploads dir: {os.path.join(root, UPLOADS_DIRNAME)}")
     print("Data dir: _data/ (json.save/load)")
-    httpd.serve_forever()
+
+    try:
+        httpd.serve_forever()
+    finally:
+        try:
+            httpd.nc_session.stop_process()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
