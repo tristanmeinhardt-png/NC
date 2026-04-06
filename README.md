@@ -2,7 +2,7 @@
 
 ## What is NC?
 
-NC (NeuroConsole) is a scripting language that runs on top of Python and is designed to make console programs easier to write and easier to read.
+NC (NeuroConsole) is a scripting language that runs on top of Python and is designed to make console programs easier to write, easier to read, and faster to prototype.
 
 NC uses `.nc` files as source files. These files are executed by the NC interpreter (`nc.py`) and the command-line launcher (`nc_console.py`). The project also includes an NC HTTP server (`nc_server.py`) and a GUI/TWIN host (`nc_twin_run.py`).
 
@@ -114,6 +114,85 @@ This feature requires `pyinstaller`.
 
 ---
 
+# New in this version
+
+This version adds several quality-of-life features for console apps and menus.
+
+## 1. Input without parentheses
+
+Both styles now work:
+
+```nc
+let name = input("What is your name?")
+```
+
+```nc
+let name = input "What is your name?"
+```
+
+## 2. Better `+` string concatenation
+
+This now works much better:
+
+```nc
+let name = input "What is your name?"
+print "Hello, " + name + "!"
+```
+
+## 3. `end` keyword
+
+`end` closes the current NC run immediately.
+
+```nc
+print "Hello"
+end
+print "This will not run"
+```
+
+This is especially useful in buttons:
+
+```nc
+button "Exit":
+  action:
+    end
+```
+
+## 4. `end` can be aliased
+
+```nc
+end = ending
+
+button "Exit":
+  action:
+    ending
+```
+
+## 5. Button keyword variants
+
+NC accepts all of these button keywords:
+
+```nc
+button "Play":
+  action:
+    print "Starting"
+```
+
+```nc
+botton "Play":
+  action:
+    print "Starting"
+```
+
+```nc
+knopf "Play":
+  action:
+    print "Starting"
+```
+
+For documentation and examples, `button` is recommended as the standard spelling.
+
+---
+
 # Complete NC learning guide
 
 ## 1. Print text
@@ -126,14 +205,24 @@ print "NC is readable"
 
 ## 2. Variables
 
+Use `let` for a new variable and `set` for an existing variable.
+
 ```nc
-x = 5
-name = "Alex"
-enabled = true
+let x = 5
+let name = "Alex"
+let enabled = True
 
 print x
 print name
 print enabled
+```
+
+Change an existing variable:
+
+```nc
+let score = 0
+set score = score + 1
+print score
 ```
 
 ## 3. Functions
@@ -158,34 +247,25 @@ greet()
 ## 4. Repeat blocks
 
 ```nc
-repeat 3 times:
+repeat 3:
   print "Hello"
-```
-
-Repeat a function:
-
-```nc
-fn hi():
-  print "Hi"
-
-repeat (hi) 5 times
 ```
 
 ## 5. Aliases
 
 ```nc
 repeat = again
-times = x
 
-fn hi():
+again 3:
   print "Hi"
-
-again (hi) 3 x
 ```
 
 ## 6. Conditions
 
 ```nc
+let x = 5
+let enabled = True
+
 if x == 5:
   print "x is 5"
 else:
@@ -219,7 +299,7 @@ button "Start":
 
 button "Exit":
   action:
-    print "Goodbye"
+    end
 ```
 
 Buttons can be selected with arrow keys and activated with Enter.
@@ -239,7 +319,16 @@ button "Settings":
 
 button "Exit":
   action:
-    print "Closing program"
+    end
+```
+
+### Button colors
+
+```nc
+button "Play":
+  color "green"
+  action:
+    print "Starting"
 ```
 
 ## 9. Checkmarks
@@ -276,21 +365,14 @@ tick = checkmark
 
 ### `is on` / `is off`
 
-Example with `is on`/ `is off`:
-
 ```nc
 if sound is on:
   print "Sound is enabled"
 else:
   print "Sound is disabled"
-
-if music is off:
-  print "Music is disabled"
-else:
-  print "Music is enabled"
 ```
 
-If you use the normal interpreter, prefer this safer form:
+If you want the most stable and simple form, prefer this:
 
 ```nc
 if sound:
@@ -311,7 +393,23 @@ textcolor --all blue
 print "Everything is blue"
 ```
 
-## 11. Imports
+## 11. Input
+
+Classic call style:
+
+```nc
+let name = input("What is your name?")
+print name
+```
+
+New short style:
+
+```nc
+let name = input "What is your name?"
+print "Hello, " + name + "!"
+```
+
+## 12. Imports
 
 NC contains built-in placeholder modules such as `ui`, `math`, and `json`.
 
@@ -322,11 +420,9 @@ print math.pi
 import json
 ```
 
-## 12. Saving and loading data
+## 13. Saving and loading data
 
-`save checkmarks` and `load checkmarks` are not built-in language commands in the current working setup.
-
-Use the `json` module instead.
+Use the `json` module.
 
 ### Save example
 
@@ -345,7 +441,7 @@ json.save("my_settings", {
 ```nc
 import json
 
-data = json.load("my_settings", {})
+let data = json.load("my_settings", {})
 
 if data["sound"]:
   print "Saved sound was ON"
@@ -353,7 +449,7 @@ else:
   print "Saved sound was OFF"
 ```
 
-## 13. GUI / TWIN output
+## 14. GUI / TWIN output
 
 NC can also produce structured GUI-style output through `__TWIN__` messages.
 
@@ -363,9 +459,9 @@ The GUI host can render:
 - tables
 - plots
 - HTML content
-- TWIN / t_windows style messages
+- TWIN / `t_windows` style messages
 
-## 14. NC server mode
+## 15. NC server mode
 
 `nc_server.py` can run NC files as lightweight web handlers.
 
@@ -375,6 +471,8 @@ It can:
 - inject request data into NC code
 - capture NC output
 - return HTTP metadata and body content
+
+---
 
 # Step-by-step tutorial
 
@@ -401,7 +499,7 @@ python nc_console.py hello.nc
 ## Step 2: Use variables
 
 ```nc
-name = "Chris"
+let name = "Chris"
 print name
 ```
 
@@ -417,23 +515,14 @@ greet()
 ## Step 4: Repeat actions
 
 ```nc
-repeat 3 times:
+repeat 3:
   print "Repeat works"
 ```
 
-## Step 5: Repeat a function
+## Step 5: Use conditions
 
 ```nc
-fn beep():
-  print "Beep"
-
-repeat (beep) 4 times
-```
-
-## Step 6: Use conditions
-
-```nc
-x = 5
+let x = 5
 
 if x == 5:
   print "Correct"
@@ -441,7 +530,7 @@ else:
   print "Wrong"
 ```
 
-## Step 7: Create your first menu
+## Step 6: Create your first menu
 
 ```nc
 print "Main menu"
@@ -456,12 +545,10 @@ button "Settings":
 
 button "Exit":
   action:
-    print "Exiting"
+    end
 ```
 
-## Step 8: Add checkmarks
-
-Safe version:
+## Step 7: Add checkmarks
 
 ```nc
 (sound) = checkmark "Sound" color "green"
@@ -475,34 +562,55 @@ button "Continue":
       print "Sound is off"
 ```
 
-Patched-interpreter version:
+## Step 8: Ask the user for a name
 
 ```nc
-(sound) = checkmark "Sound" color "green"
-(music) = checkmark "Music" color "cyan"
-
-button "Continue":
+button "Say hello":
   action:
-    if sound is on:
-      print "Sound is on"
-    else:
-      print "Sound is off"
+    let name = input "What is your name?"
+    print "Hello, " + name + "!"
 ```
 
-## Step 9: Export your program
+## Step 9: Exit cleanly
+
+```nc
+button "Exit":
+  action:
+    end
+```
+
+## Step 10: Export your program
 
 ```bash
 python nc_console.py my_game.nc --exe
 ```
 
-# Example games in NC
+---
 
-## 1. Number guessing game
+# Example programs in NC
+
+## 1. Hello menu
+
+```nc
+print "Hello!"
+
+button "Hello back!":
+  action:
+    print "Thanks!"
+    let name = input "What is your name?"
+    print "Nice to meet you, " + name + "!"
+
+button "Exit":
+  action:
+    end
+```
+
+## 2. Number guessing game
 
 ```nc
 print "Guess the number"
 
-target = 7
+let target = 7
 
 button "Guess 5":
   action:
@@ -520,10 +628,10 @@ button "Guess 7":
 
 button "Exit":
   action:
-    print "Game over"
+    end
 ```
 
-## 2. Simple adventure menu
+## 3. Simple adventure menu
 
 ```nc
 print "Adventure"
@@ -539,9 +647,13 @@ button "Go right":
 button "Stay":
   action:
     print "Nothing happens"
+
+button "Exit":
+  action:
+    end
 ```
 
-## 3. Settings menu game
+## 4. Settings menu game
 
 ```nc
 import json
@@ -571,31 +683,12 @@ button "Save Settings":
 
 button "Exit":
   action:
-    print "Bye"
+    end
 ```
 
-## 4. Quiz game
-
-```nc
-score = 0
-
-button "2 + 2 = 4":
-  action:
-    score = score + 1
-    print "Correct"
-
-button "2 + 2 = 5":
-  action:
-    print "Wrong"
-
-button "Show Score":
-  action:
-    print score
-```
+---
 
 # Big demo file
-
-## Safe version for the normal interpreter
 
 ```nc
 import json
@@ -603,34 +696,34 @@ import json
 print "Welcome to NC Demo"
 
 fn show_settings():
-  if sound is on:
+  if sound:
     print "Sound: ON"
   else:
     print "Sound: OFF"
 
-  if music is on:
+  if music:
     print "Music: ON"
   else:
     print "Music: OFF"
 
-  if hardmode is on:
+  if hardmode:
     print "Hard Mode: ON"
   else:
     print "Hard Mode: OFF"
 
 fn play_game():
   print "Game started"
-  if hardmode is on:
+  if hardmode:
     print "Enemies are stronger"
   else:
     print "Normal difficulty"
 
-fn repeat_demo():
-  repeat 3:
-    print "Repeat block running"
-
 fn save_settings():
-  json.save("demo_settings", {"sound": sound, "music": music, "hardmode": hardmode})
+  json.save("demo_settings", {
+    "sound": sound,
+    "music": music,
+    "hardmode": hardmode
+  })
   print "Settings saved"
 
 let data = json.load("demo_settings", {})
@@ -657,19 +750,16 @@ button "Play":
   action:
     play_game()
 
-button "Repeat Demo":
-  action:
-    repeat_demo()
-
 button "Save Settings":
   action:
     save_settings()
 
 button "Exit":
   action:
-    print "Program ended"
-
+    end
 ```
+
+---
 
 # Structure explanation
 
@@ -681,11 +771,10 @@ button "Exit":
 - `docs/` → beginner-friendly documentation
 - `standart_imports/` → standard import modules as named in the interpreter configuration
 
-## Suggested requirements.txt
+## Suggested `requirements.txt`
 
 ```text
 pyinstaller
 PySide6
 PySide6-QtWebEngine
 ```
-
