@@ -42,7 +42,58 @@ from urllib.parse import urlparse, urljoin
 # -----------------------------
 # Your requested standard imports folder
 # -----------------------------
-STANDARD_IMPORTS_DIR = r"C:\Users\meinh\NC\standart_imports"
+def _resolve_standard_imports_dir() -> str:
+    """
+    Resolve the NC standard imports directory in a portable, bugfix-safe way.
+
+    Priority:
+    1) NC_STANDARD_IMPORTS_DIR env var
+    2) "standart_imports" next to this nc.py file
+    3) ~/NC/standart_imports
+    4) legacy hardcoded Windows path (only if it still exists)
+
+    We also create the preferred directory when possible, so first-run imports
+    do not fail just because the folder has not been created yet.
+    """
+    candidates: List[str] = []
+
+    env_dir = os.environ.get("NC_STANDARD_IMPORTS_DIR", "").strip()
+    if env_dir:
+        candidates.append(os.path.abspath(os.path.expanduser(env_dir)))
+
+    local_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "standart_imports")
+    home_dir = os.path.join(os.path.expanduser("~"), "NC", "standart_imports")
+    legacy_dir = r"C:\Users\meinh\NC\standart_imports"
+
+    candidates.extend([local_dir, home_dir])
+
+    if os.name == "nt":
+        candidates.append(legacy_dir)
+
+    for cand in candidates:
+        try:
+            if cand and os.path.isdir(cand):
+                return cand
+        except Exception:
+            pass
+
+    preferred = local_dir if os.path.isdir(os.path.dirname(local_dir)) else home_dir
+    try:
+        os.makedirs(preferred, exist_ok=True)
+    except Exception:
+        pass
+
+    if os.name == "nt":
+        try:
+            if os.path.isdir(legacy_dir):
+                return legacy_dir
+        except Exception:
+            pass
+
+    return preferred
+
+
+STANDARD_IMPORTS_DIR = _resolve_standard_imports_dir()
 
 
 # -----------------------------
