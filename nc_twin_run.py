@@ -939,16 +939,22 @@ def build_exe_from_twin_target(target: str, base: str, search_paths: list[str]) 
         raise FileNotFoundError(src_path)
 
     exe_name = _safe_exe_name_from_target(src_path)
-    pyinstaller_exe = shutil.which("pyinstaller")
-    pyinstaller_cmd = [pyinstaller_exe] if pyinstaller_exe else [sys.executable, "-m", "PyInstaller"]
+    pyinstaller_exe = shutil.which("pyinstaller") or shutil.which("pyinstaller.exe")
+    if pyinstaller_exe:
+        pyinstaller_cmd = [pyinstaller_exe]
+    else:
+        # Bugfix: the module name is lowercase `pyinstaller`.
+        pyinstaller_cmd = [sys.executable, "-m", "pyinstaller"]
 
     build_root = Path(base if (base and not _is_url(base)) else os.path.dirname(src_path)).resolve()
     output_root = build_root / "nc_twin_exe_build"
     output_root.mkdir(parents=True, exist_ok=True)
 
     safe_search_paths = _existing_search_paths(search_paths)
+    module_name = Path(THIS_FILE).stem
+
     hidden_imports = [
-        "nc_twin_run_fixed",
+        module_name,
         "nc_console",
         "nc",
         "PySide6.QtWebEngineWidgets",
@@ -978,8 +984,9 @@ def build_exe_from_twin_target(target: str, base: str, search_paths: list[str]) 
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             details = (proc.stderr or "").strip() or (proc.stdout or "").strip() or "PyInstaller failed"
-            if "No module named PyInstaller" in details:
-                raise RuntimeError("PyInstaller is not installed. Install it with: pip install pyinstaller") from None
+            low = details.lower()
+            if "no module named pyinstaller" in low.replace("'", ""):
+                raise RuntimeError("PyInstaller is not installed in this Python environment. Install it in the same venv with: python -m pip install pyinstaller") from None
             raise RuntimeError(details)
 
     exe_path = output_root / "dist" / f"{exe_name}.exe"
