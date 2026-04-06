@@ -18,6 +18,8 @@
 #     content_css, content_js
 # - Optional command to run JS on the currently loaded HTML:
 #     cmd/action: "html.eval" (or "js.eval") with field: code
+# - --exe support: build a standalone Windows EXE that launches this GUI host
+#   and still opens real TWIN / t_windows windows.
 #
 # NOTE:
 # - If QtWebEngine is not installed, HTML falls back to QTextEdit.setHtml() (no JS).
@@ -25,10 +27,15 @@
 
 from __future__ import annotations
 
-import os
-import sys
-import json
+import argparse
 import base64
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QProcess, QTimer, QRectF, QCoreApplication, QObject, Signal, Slot
 from PySide6.QtGui import QPainter, QPen, QColor
@@ -64,7 +71,6 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
 )
 
-
 # ---- Optional Camera Support (QtMultimedia) ----
 CAMERA_AVAILABLE = False
 try:
@@ -78,9 +84,48 @@ except Exception:
     QMediaRecorder = None  # type: ignore
     QVideoWidget = None  # type: ignore
 
-
 HERE = os.path.dirname(os.path.abspath(__file__))
+THIS_FILE = os.path.abspath(__file__)
 NC_CONSOLE = os.path.join(HERE, "nc_console.py")
+
+
+def _is_url(s: str) -> bool:
+    return str(s).startswith("https://") or str(s).startswith("http://")
+
+
+def _safe_exe_name_from_target(target: str) -> str:
+    base = os.path.basename(target)
+    if base.lower().endswith(".nc"):
+        base = base[:-3]
+    base = base.strip() or "nc_twin_app"
+    cleaned = []
+    for ch in base:
+        cleaned.append(ch if (ch.isalnum() or ch in ("_", "-", ".")) else "_")
+    return "".join(cleaned).strip("._") or "nc_twin_app"
+
+
+def _compute_base(target: str) -> str:
+    if _is_url(target):
+        return target.rsplit("/", 1)[0] + "/"
+    return os.path.dirname(os.path.abspath(target)) or os.getcwd()
+
+
+def _existing_search_paths(paths: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in paths or []:
+        try:
+            p = os.path.abspath(str(raw))
+        except Exception:
+            continue
+        if not os.path.isdir(p):
+            continue
+        key = os.path.normcase(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
 
 
 # -----------------------------
@@ -245,12 +290,14 @@ _BRIDGE_INJECT = r"""
 </script>
 """
 
+
 def _insert_before_closing_head(doc: str, injection: str) -> str:
     lo = doc.lower()
     idx = lo.rfind("</head>")
     if idx >= 0:
         return doc[:idx] + injection + doc[idx:]
     return doc
+
 
 def _wrap_as_document(body_html: str, extra_head: str) -> str:
     return (
@@ -261,12 +308,8 @@ def _wrap_as_document(body_html: str, extra_head: str) -> str:
         + "</body></html>"
     )
 
+
 def _compose_html(html: str, extra_css: str = "", extra_js: str = "", enable_bridge: bool = True) -> str:
-    """
-    Takes any HTML snippet or full document and injects:
-    - <style>extra_css</style>
-    - <script>bridge + extra_js</script>
-    """
     html = html or ""
     extra_css = extra_css or ""
     extra_js = extra_js or ""
@@ -281,29 +324,20 @@ def _compose_html(html: str, extra_css: str = "", extra_js: str = "", enable_bri
 
     lo = html.lower()
 
-    # If it's a full document, inject into <head> if possible.
     if "<html" in lo:
-        # If there is a head section, inject before </head>, else create head after <html...>
         if "<head" in lo:
             out = _insert_before_closing_head(html, head_bits)
             if out != html:
                 return out
-            # head exists but no </head> found -> just append head bits at start
             return head_bits + html
-        # no head => best-effort: insert head bits right after <html...>
         pos = lo.find("<html")
         gt = lo.find(">", pos) if pos >= 0 else -1
         if gt >= 0:
             return html[:gt + 1] + "<head>" + head_bits + "</head>" + html[gt + 1:]
         return _wrap_as_document(html, head_bits)
 
-    # Not a full document => treat as body snippet
     return _wrap_as_document(html, head_bits)
 
-
-# -----------------------------
-# JS bridge object (JS -> Python log)
-# -----------------------------
 
 class WebBridge(QObject):
     message = Signal(str)
@@ -316,10 +350,6 @@ class WebBridge(QObject):
     def ready(self):
         self.message.emit("[bridge] ready")
 
-
-# -----------------------------
-# Twin window UI
-# -----------------------------
 
 class TwinWindow(QMainWindow):
     def __init__(self, wid: str, title: str, w: int, h: int):
@@ -338,49 +368,37 @@ class TwinWindow(QMainWindow):
 
         self.tabs = QTabWidget()
 
-        # --- Log tab ---
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         self.log.setPlaceholderText("Waiting for output...")
         self.tabs.addTab(self.log, "Log")
 
-        # --- Plots tab ---
         plot_root = QWidget()
         plot_lay = QVBoxLayout(plot_root)
         plot_lay.setContentsMargins(8, 8, 8, 8)
-
         self.plot_canvas = PlotCanvas()
         plot_lay.addWidget(self.plot_canvas, 1)
         self.tabs.addTab(plot_root, "Plots")
 
-        # --- Tables tab ---
         tables_root = QWidget()
         tables_lay = QVBoxLayout(tables_root)
         tables_lay.setContentsMargins(8, 8, 8, 8)
-
         self.table_selector = QComboBox()
         self.table_widget = QTableWidget()
         self.table_widget.setRowCount(0)
         self.table_widget.setColumnCount(2)
         self.table_widget.setHorizontalHeaderLabels(["C0", "C1"])
         self.table_widget.horizontalHeader().setStretchLastSection(True)
-
         self.tables: dict[str, list[list[object]]] = {}
         self.table_selector.currentTextChanged.connect(self._render_selected_table)
-
         tables_lay.addWidget(self.table_selector)
         tables_lay.addWidget(self.table_widget, 1)
         self.tabs.addTab(tables_root, "Tables")
 
-        # --- HTML tab ---
-        # If WebEngine available => full HTML/CSS/JS/SVG + bridge
-        # Else fallback => QTextEdit.setHtml (no JS)
         self._web_bridge = None
         self._web_channel = None
-
         if WEBENGINE_AVAILABLE:
             self.html = QWebEngineView()
-            # Install WebChannel bridge so JS can call ncSend("...")
             try:
                 self._web_bridge = WebBridge()
                 self._web_bridge.message.connect(lambda m: self.append_log(f"[js] {m}"))
@@ -389,7 +407,6 @@ class TwinWindow(QMainWindow):
                 self.html.page().setWebChannel(self._web_channel)
             except Exception as e:
                 self.append_log(f"[warn] WebChannel init failed: {e}")
-
             self.html.setHtml(
                 _compose_html(
                     "<div style='background:#111;color:#ddd;font-family:Segoe UI;padding:14px;'>No HTML content yet…</div>",
@@ -402,193 +419,108 @@ class TwinWindow(QMainWindow):
             self.html.setPlaceholderText("QtWebEngine missing: HTML shown without JS. Install PySide6-QtWebEngine.")
         self.tabs.addTab(self.html, "HTML")
 
-        # --- UI tab (NCUI2: no HTML/CSS) ---
         self.ui2_root = QWidget()
         self.ui2_lay = QVBoxLayout(self.ui2_root)
         self.ui2_lay.setContentsMargins(12, 12, 12, 12)
         self.ui2_lay.setSpacing(10)
-
         self.ui2_scroll = QScrollArea()
         self.ui2_scroll.setWidgetResizable(True)
         self.ui2_scroll.setFrameShape(QFrame.NoFrame)
         self.ui2_scroll.setWidget(self.ui2_root)
         self.tabs.addTab(self.ui2_scroll, "UI")
 
-
-        # --- Camera tab ---
         cam_root = QWidget()
         cam_lay = QVBoxLayout(cam_root)
         cam_lay.setContentsMargins(8, 8, 8, 8)
+        if CAMERA_AVAILABLE and QVideoWidget is not None:
+            self._cam_video = QVideoWidget()
+            cam_lay.addWidget(self._cam_video, 1)
+        else:
+            self._cam_video = None
+            cam_lay.addWidget(QLabel("Camera not available"))
+        self.tabs.addTab(cam_root, "Camera")
 
         self._cam_session = None
         self._cam = None
         self._cam_image = None
         self._cam_recorder = None
-        self._cam_video = None
-
-        if CAMERA_AVAILABLE and QVideoWidget is not None:
-            self._cam_video = QVideoWidget()
-            cam_lay.addWidget(self._cam_video, 1)
-            info = QLabel("Camera bereit. Verwende cam.open(...) in NC.")
-            info.setStyleSheet("opacity:.8;")
-            cam_lay.addWidget(info)
-        else:
-            info = QLabel("Camera nicht verfügbar: QtMultimedia fehlt. Install: pip install PySide6")
-            info.setStyleSheet("opacity:.8;")
-            cam_lay.addWidget(info, 1)
-
-        self.tabs.addTab(cam_root, "Camera")
 
         lay.addWidget(self.header)
         lay.addWidget(self.tabs, 1)
         self.setCentralWidget(root)
 
-    def append_log(self, text: str):
-        self.log.append(text)
-
     def set_title(self, title: str):
         self.setWindowTitle(title)
         self.header.setText(f"NC Window: {title}")
 
-    def set_table(self, name: str, rows: list[list[object]]):
-        name = str(name)
-        self.tables[name] = rows
-        if self.table_selector.findText(name) < 0:
-            self.table_selector.addItem(name)
-        self.table_selector.setCurrentText(name)
-        self.tabs.setCurrentIndex(2)
-
-    def _render_selected_table(self, name: str):
-        rows = self.tables.get(name) or []
-
-        # max columns
-        max_cols = 0
-        for r in rows:
-            if isinstance(r, list):
-                max_cols = max(max_cols, len(r))
-        if max_cols <= 0:
-            max_cols = 1
-
-        self.table_widget.clear()
-        self.table_widget.setRowCount(len(rows))
-        self.table_widget.setColumnCount(max_cols)
-
-        # If first row is all strings, treat as header row (optional)
-        headers = []
-        if rows and isinstance(rows[0], list) and rows[0] and all(isinstance(x, str) for x in rows[0]):
-            if len(rows[0]) == max_cols:
-                headers = [str(x) for x in rows[0]]
-
-        if headers:
-            self.table_widget.setHorizontalHeaderLabels(headers)
-        else:
-            self.table_widget.setHorizontalHeaderLabels([f"C{i}" for i in range(max_cols)])
-
-        for i, r in enumerate(rows):
-            if not isinstance(r, list):
-                r = [r]
-            for j in range(max_cols):
-                val = r[j] if j < len(r) else ""
-                item = QTableWidgetItem(str(val))
-                self.table_widget.setItem(i, j, item)
-
-        self.table_widget.resizeColumnsToContents()
-        self.table_widget.horizontalHeader().setStretchLastSection(True)
+    def append_log(self, text: str):
+        self.log.append(str(text))
 
     def add_plot_point(self, series: str, step: int, value: float):
         self.plot_canvas.add_point(series, step, value)
-        self.tabs.setCurrentIndex(1)
+        self.tabs.setCurrentIndex(self.tabs.indexOf(self.plot_canvas.parentWidget()))
+
+    def set_table(self, name: str, rows: list):
+        key = str(name or "table")
+        norm_rows: list[list[object]] = []
+        for r in rows or []:
+            if isinstance(r, (list, tuple)):
+                norm_rows.append(list(r))
+            else:
+                norm_rows.append([r])
+        self.tables[key] = norm_rows
+        if self.table_selector.findText(key) < 0:
+            self.table_selector.addItem(key)
+        self.table_selector.setCurrentText(key)
+        self._render_selected_table(key)
+        self.tabs.setCurrentIndex(self.tabs.indexOf(self.table_widget.parentWidget()))
+
+    def _render_selected_table(self, key: str):
+        rows = self.tables.get(key, [])
+        cols = max((len(r) for r in rows), default=0)
+        self.table_widget.setRowCount(len(rows))
+        self.table_widget.setColumnCount(max(1, cols))
+        self.table_widget.setHorizontalHeaderLabels([f"C{i}" for i in range(max(1, cols))])
+        for y, row in enumerate(rows):
+            for x in range(max(1, cols)):
+                val = row[x] if x < len(row) else ""
+                self.table_widget.setItem(y, x, QTableWidgetItem(str(val)))
 
     def set_html(self, html: str, css: str = "", js: str = ""):
-        # WebEngine: full JS/CSS/SVG
+        doc = _compose_html(html, extra_css=css, extra_js=js, enable_bridge=True)
         if WEBENGINE_AVAILABLE and hasattr(self.html, "setHtml"):
-            doc = _compose_html(html, extra_css=css, extra_js=js, enable_bridge=True)
             self.html.setHtml(doc)
-            self.tabs.setCurrentIndex(3)
-            return
-
-        # fallback: QTextEdit (no JS)
-        if isinstance(self.html, QTextEdit):
-            # Keep CSS applied in fallback (works), JS ignored (no engine)
-            doc = _compose_html(html, extra_css=css, extra_js="", enable_bridge=False)
+        else:
             self.html.setHtml(doc)
-            self.tabs.setCurrentIndex(3)
-            if (js or "").strip():
-                self.append_log("[warn] QtWebEngine missing => JS cannot run in HTML tab.")
-            return
-
-        self.append_log("[warn] HTML renderer not available")
+        self.tabs.setCurrentIndex(self.tabs.indexOf(self.html))
 
     def eval_js(self, code: str):
-        if not WEBENGINE_AVAILABLE or not hasattr(self.html, "page"):
-            self.append_log("[warn] JS eval not available (QtWebEngine missing).")
-            return
-        try:
-            # runJavaScript is async; log the returned value if any
-            self.html.page().runJavaScript(
-                code,
-                lambda result: self.append_log(f"[js.result] {result!r}")
-            )
-        except Exception as e:
-            self.append_log(f"[warn] JS eval failed: {e}")
-
-
-    # ---------- NCUI2 (no HTML/CSS) ----------
-
-    def ui2_clear(self):
-        # remove widgets from layout
-        while self.ui2_lay.count():
-            item = self.ui2_lay.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
-                w.deleteLater()
+        if WEBENGINE_AVAILABLE and hasattr(self.html, "page"):
+            try:
+                self.html.page().runJavaScript(str(code))
+            except Exception as e:
+                self.append_log(f"[js.eval] failed: {e}")
+        else:
+            self.append_log("[js.eval] QtWebEngine not available")
 
     def ui2_set_scene(self, scene: dict):
-        """Render a simple scene graph produced by NC's UI DSL without using HTML/CSS."""
         try:
-            self.ui2_clear()
-            nodes = scene.get("nodes", []) if isinstance(scene, dict) else []
-            styles = scene.get("styles", {}) if isinstance(scene, dict) else {}
-            anims = scene.get("anims", {}) if isinstance(scene, dict) else {}
-
-            for n in nodes if isinstance(nodes, list) else []:
+            while self.ui2_lay.count():
+                item = self.ui2_lay.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.deleteLater()
+            nodes = scene.get("nodes") or []
+            anims = scene.get("anims") or {}
+            for n in nodes:
                 if not isinstance(n, dict):
                     continue
-                tag = str(n.get("tag", "text")).lower()
-                txt = n.get("text")
-                if tag in ("button", "btn"):
-                    w = QPushButton(str(txt or n.get("label") or "Button"))
+                kind = str(n.get("type", "label"))
+                if kind == "button":
+                    w = QPushButton(str(n.get("text", "Button")))
                 else:
-                    w = QLabel(str(txt or ""))
-                    w.setWordWrap(True)
-
-                # Apply style (use + inline)
-                props = {}
-                use = n.get("use")
-                if use and isinstance(styles, dict) and use in styles:
-                    props.update(styles.get(use) or {})
-                inline = n.get("props")
-                if isinstance(inline, dict):
-                    props.update(inline)
-
-                # font
-                try:
-                    f = w.font()
-                    fs = props.get("font_size")
-                    if fs is not None:
-                        f.setPointSizeF(float(fs))
-                    fw = props.get("font_weight")
-                    if fw is not None:
-                        try:
-                            f.setWeight(int(fw))
-                        except Exception:
-                            pass
-                    w.setFont(f)
-                except Exception:
-                    pass
-
-                # color / opacity
+                    w = QLabel(str(n.get("text", "")))
+                props = n.get("props") or {}
                 try:
                     col = props.get("color")
                     if isinstance(col, (list, tuple)) and len(col) >= 3:
@@ -603,46 +535,35 @@ class TwinWindow(QMainWindow):
                         w.setGraphicsEffect(eff)
                 except Exception:
                     pass
-
                 self.ui2_lay.addWidget(w)
-
-                # very small animation support: fadeIn
                 anim_name = n.get("anim")
                 if anim_name and isinstance(anims, dict) and anim_name in anims:
-                    # for now: if keyframes mention opacity 0->1, animate opacity
-                    kf = anims.get(anim_name) or {}
                     try:
                         eff = w.graphicsEffect()
                         if not isinstance(eff, QGraphicsOpacityEffect):
                             eff = QGraphicsOpacityEffect()
                             eff.setOpacity(0.0)
                             w.setGraphicsEffect(eff)
-                        # We intentionally keep it simple (no heavy UI rebuild)
                         from PySide6.QtCore import QPropertyAnimation
                         anim = QPropertyAnimation(eff, b"opacity", w)
-                        anim.setStartValue(float(kf.get("opacity_from", 0.0)))
-                        anim.setEndValue(float(kf.get("opacity_to", 1.0)))
-                        anim.setDuration(int(kf.get("duration_ms", 600)))
+                        anim.setStartValue(float(anims[anim_name].get("opacity_from", 0.0)))
+                        anim.setEndValue(float(anims[anim_name].get("opacity_to", 1.0)))
+                        anim.setDuration(int(anims[anim_name].get("duration_ms", 600)))
                         anim.start()
                     except Exception:
                         pass
-
             self.tabs.setCurrentIndex(self.tabs.indexOf(self.ui2_scroll))
         except Exception as e:
             self.append_log(f"[ui2] render failed: {e}")
-
-    # ---------- Camera support (optional) ----------
 
     def camera_open(self, facing: str = "back", w: int = 1280, h: int = 720, fps: int = 30):
         if not CAMERA_AVAILABLE:
             self.append_log("[camera] QtMultimedia not available.")
             return False
         try:
-            # Lazy init
             if self._cam_session is None:
                 self._cam_session = QMediaCaptureSession()
             if self._cam is None:
-                # Choose default camera (facing is best-effort; Qt chooses default)
                 self._cam = QCamera()
                 self._cam_session.setCamera(self._cam)
             if self._cam_video is not None:
@@ -653,8 +574,6 @@ class TwinWindow(QMainWindow):
             if self._cam_recorder is None:
                 self._cam_recorder = QMediaRecorder()
                 self._cam_session.setRecorder(self._cam_recorder)
-
-            # Start camera
             self._cam.start()
             self.tabs.setCurrentIndex(self.tabs.indexOf(self._cam_video.parentWidget() if self._cam_video else self.tabs.widget(4)))
             self.append_log(f"[camera] open facing={facing} {w}x{h}@{fps}")
@@ -676,7 +595,6 @@ class TwinWindow(QMainWindow):
             self.append_log("[camera] snap not available")
             return
         try:
-            # QImageCapture stores to file path
             self._cam_image.captureToFile(str(path))
             self.append_log(f"[camera] snap -> {path}")
         except Exception as e:
@@ -687,7 +605,6 @@ class TwinWindow(QMainWindow):
             self.append_log("[camera] recorder not available")
             return
         try:
-            # best-effort: set output location
             from PySide6.QtCore import QUrl
             self._cam_recorder.setOutputLocation(QUrl.fromLocalFile(str(path)))
             self._cam_recorder.record()
@@ -706,28 +623,24 @@ class TwinWindow(QMainWindow):
             self.append_log(f"[camera] record_stop failed: {e}")
 
     def camera_set(self, key: str, value):
-        # Placeholder: different backends expose different controls
         self.append_log(f"[camera] set {key}={value} (not implemented)")
 
 
-
-
-# -----------------------------
-# Host process + command router
-# -----------------------------
-
 class HostApp:
-    def __init__(self, argv: list[str]):
-        self.app = QApplication.instance() or QApplication(argv)
-
+    def __init__(self, host_argv: list[str], child_argv: list[str]):
+        self.app = QApplication.instance() or QApplication(host_argv)
         self.windows: dict[str, TwinWindow] = {}
         self.default_window_id = "nc_sim"
-
         self.proc = QProcess()
-        py = sys.executable
-        self.proc.setProgram(py)
-        self.proc.setArguments([NC_CONSOLE] + argv[1:])
-        self.proc.setWorkingDirectory(HERE)
+
+        if getattr(sys, "frozen", False):
+            self.proc.setProgram(sys.executable)
+            self.proc.setArguments(["--__nc_child__"] + list(child_argv))
+            self.proc.setWorkingDirectory(os.getcwd())
+        else:
+            self.proc.setProgram(sys.executable)
+            self.proc.setArguments([THIS_FILE, "--__nc_child__"] + list(child_argv))
+            self.proc.setWorkingDirectory(HERE)
 
         self.proc.readyReadStandardOutput.connect(self._on_stdout)
         self.proc.readyReadStandardError.connect(self._on_stderr)
@@ -739,30 +652,17 @@ class HostApp:
     def run(self) -> int:
         self.proc.start()
         if not self.proc.waitForStarted(5000):
-            print("NCW GUI: Failed to start nc_console.py")
+            print("NCW GUI: Failed to start NC child process")
             return 2
-
         QTimer.singleShot(250, self._ensure_console_window)
         return self.app.exec()
 
     def _ensure_console_window(self):
-        """Ensure the default console/log window exists.
-
-        Output can arrive before the startup timer fires *or* after another window
-        has already been created via a TWIN command. In both cases we must avoid
-        crashing with KeyError when appending plain stdout/stderr lines.
-        """
-
-        # If the default id already exists, we're done.
         if self.default_window_id in self.windows:
             return
-
-        # If some other window exists already, use it as the default sink.
         if self.windows and self.default_window_id not in self.windows:
             self.default_window_id = next(iter(self.windows.keys()))
             return
-
-        # Otherwise create the default window.
         w = TwinWindow(self.default_window_id, "NC Output", 1000, 700)
         w.show()
         self.windows[self.default_window_id] = w
@@ -772,12 +672,10 @@ class HostApp:
             w.append_log("[info] HTML tab supports JS. In HTML you can call: ncSend('hi')")
 
     def _default_log_window(self):
-        """Return a safe window to append logs to (never raises KeyError)."""
         self._ensure_console_window()
         win = self.windows.get(self.default_window_id)
         if win is None and self.windows:
             win = next(iter(self.windows.values()))
-            # Keep default_window_id in sync for subsequent log appends.
             for k, v in self.windows.items():
                 if v is win:
                     self.default_window_id = k
@@ -804,13 +702,10 @@ class HostApp:
         win.activateWindow()
         return win
 
-    # ---------- messagebox (t_windows style) ----------
-
     def _msgbox(self, kind: str, title: str, message: str, default: bool = False):
         mb = QMessageBox()
         mb.setWindowTitle(title or "Message")
         mb.setText(message or "")
-
         k = (kind or "").lower()
         if k == "info":
             mb.setIcon(QMessageBox.Information)
@@ -828,45 +723,31 @@ class HostApp:
         else:
             mb.setIcon(QMessageBox.Information)
             mb.setStandardButtons(QMessageBox.Ok)
-
         return mb.exec()
 
-    # ---------- command handler ----------
-
     def _handle_twin(self, cmd: dict):
-        # Normalize: support both "cmd" (NC) and "action" (t_windows)
         c = cmd.get("cmd") or cmd.get("action")
-
-        # --- window open/create ---
         if c in ("window.open", "create", "window"):
             wid = str(cmd.get("id", self.default_window_id))
             title = str(cmd.get("title", "NC"))
             w = int(cmd.get("w", 1000))
             h = int(cmd.get("h", 700))
             win = self._get_or_create_window(wid, title, w, h)
-
-            # t_windows can send content_html (+ optional css/js)
             content_html = cmd.get("content_html")
             content_css = cmd.get("content_css", "")
             content_js = cmd.get("content_js", "")
             if isinstance(content_html, str) and content_html.strip():
                 win.set_html(content_html, css=str(content_css or ""), js=str(content_js or ""))
             return
-
-        # --- window close ---
         if c in ("window.close", "close"):
             wid = str(cmd.get("id", self.default_window_id))
             win = self.windows.pop(wid, None)
             if win:
                 win.close()
             return
-
-        # --- t_windows init ---
         if c == "init":
             self._ensure_console_window()
             self.windows[self.default_window_id].append_log(f"[init] {cmd}")
-
-            # If it contains windows, open them
             wins = cmd.get("windows")
             if isinstance(wins, list):
                 for wobj in wins:
@@ -882,8 +763,6 @@ class HostApp:
                         if isinstance(html, str) and html.strip():
                             win.set_html(html, css=str(css or ""), js=str(js or ""))
             return
-
-        # --- message boxes (t_windows) ---
         if c == "msgbox":
             kind = str(cmd.get("kind", "info"))
             title = str(cmd.get("title", "Message"))
@@ -891,9 +770,6 @@ class HostApp:
             default = bool(cmd.get("default", False))
             self._msgbox(kind, title, message, default=default)
             return
-
-
-        # --- UI2 scene set (no HTML/CSS) ---
         if c in ("ui.scene", "ui2.scene", "scene.set"):
             wid = str(cmd.get("id", self.default_window_id))
             title = str(cmd.get("title", self.windows.get(wid).windowTitle() if wid in self.windows else "NC"))
@@ -904,20 +780,15 @@ class HostApp:
             else:
                 win.append_log(f"[ui.scene] bad scene type: {type(scene)}")
             return
-
-        # --- HTML set (explicit) ---
         if c in ("html.set", "window.html", "html"):
             wid = str(cmd.get("id", self.default_window_id))
             title = str(cmd.get("title", self.windows.get(wid).windowTitle() if wid in self.windows else "NC"))
             win = self._get_or_create_window(wid, title, 1000, 700)
-
             html = str(cmd.get("html", cmd.get("content_html", "")) or "")
             css = str(cmd.get("css", cmd.get("content_css", "")) or "")
             js = str(cmd.get("js", cmd.get("content_js", "")) or "")
             win.set_html(html, css=css, js=js)
             return
-
-        # --- JS eval (run code on current HTML tab) ---
         if c in ("html.eval", "js.eval", "window.eval_js"):
             wid = str(cmd.get("id", self.default_window_id))
             win = self.windows.get(wid) or self.windows.get(self.default_window_id)
@@ -930,46 +801,28 @@ class HostApp:
                 return
             win.eval_js(code)
             return
-
-        # --- table.set (NC UI bridge) ---
         if c == "table.set":
             wid = str(cmd.get("id", self.default_window_id))
             name = str(cmd.get("name", "table"))
             rows = cmd.get("rows", [])
-            win = self._get_or_create_window(
-                wid,
-                self.windows.get(wid).windowTitle() if wid in self.windows else "NC",
-                1000,
-                700,
-            )
+            win = self._get_or_create_window(wid, self.windows.get(wid).windowTitle() if wid in self.windows else "NC", 1000, 700)
             if isinstance(rows, list):
                 win.set_table(name, rows)
             else:
                 win.append_log(f"[table.set] bad rows type: {type(rows)}")
             return
-
-        # --- plot.add (NC UI bridge) ---
         if c == "plot.add":
             wid = str(cmd.get("id", self.default_window_id))
             series = str(cmd.get("series", "series"))
             step = int(cmd.get("step", 0))
             value = float(cmd.get("value", 0.0))
-            win = self._get_or_create_window(
-                wid,
-                self.windows.get(wid).windowTitle() if wid in self.windows else "NC",
-                1000,
-                700,
-            )
+            win = self._get_or_create_window(wid, self.windows.get(wid).windowTitle() if wid in self.windows else "NC", 1000, 700)
             win.add_plot_point(series, step, value)
             return
-
-        
-        # --- camera.* (NC cam bridge) ---
         if c in ("camera.open", "camera.close", "camera.snap", "camera.record_start", "camera.record_stop", "camera.set"):
             wid = str(cmd.get("id", self.default_window_id))
             title = self.windows.get(wid).windowTitle() if wid in self.windows else "NC Camera"
             win = self._get_or_create_window(wid, title, 1000, 700)
-
             if c == "camera.open":
                 facing = str(cmd.get("facing", "back"))
                 ww = int(cmd.get("w", 1280))
@@ -977,16 +830,13 @@ class HostApp:
                 fps = int(cmd.get("fps", 30))
                 win.camera_open(facing=facing, w=ww, h=hh, fps=fps)
                 return
-
             if c == "camera.close":
                 win.camera_close()
                 return
-
             if c == "camera.snap":
                 path = str(cmd.get("path", "snap.jpg"))
                 win.camera_snap(path)
                 return
-
             if c == "camera.record_start":
                 path = str(cmd.get("path", "video.mp4"))
                 ww = int(cmd.get("w", 1280))
@@ -994,40 +844,29 @@ class HostApp:
                 fps = int(cmd.get("fps", 30))
                 win.camera_record_start(path, w=ww, h=hh, fps=fps)
                 return
-
             if c == "camera.record_stop":
                 win.camera_record_stop()
                 return
-
             if c == "camera.set":
                 key = str(cmd.get("key", ""))
                 val = cmd.get("value")
                 win.camera_set(key, val)
                 return
-
-# Unknown: log it
         self._ensure_console_window()
         self.windows[self.default_window_id].append_log(f"[TWIN] {cmd}")
-
-    # ---------- IO line buffering ----------
 
     def _consume_lines(self, chunk: str, is_err: bool):
         buf = self._buf_err if is_err else self._buf_out
         buf += chunk
-
         lines = buf.splitlines(keepends=False)
-
-        # keep last partial line if no newline
         if buf and not buf.endswith("\n") and lines:
             buf = lines.pop()
         else:
             buf = ""
-
         if is_err:
             self._buf_err = buf
         else:
             self._buf_out = buf
-
         for line in lines:
             stripped = line.strip()
             tw = _try_parse_twin(stripped)
@@ -1052,7 +891,6 @@ class HostApp:
 
     def _on_finished(self, code: int, status):
         self._ensure_console_window()
-        # Guard: default_window_id might not exist if window creation failed/changed.
         win = self.windows.get(self.default_window_id)
         if win is None and self.windows:
             win = next(iter(self.windows.values()))
@@ -1060,15 +898,111 @@ class HostApp:
             win.append_log(f"\n[NCW GUI] process finished (code={code})")
         else:
             print(f"[NCW GUI] process finished (code={code})")
-        # keep windows open
 
 
-def main() -> int:
-    if any(a in ("-h", "--help") for a in sys.argv[1:]):
-        os.system(f'"{sys.executable}" "{NC_CONSOLE}" --help')
+def build_exe_from_twin_target(target: str, base: str, search_paths: list[str]) -> str:
+    if _is_url(target):
+        raise RuntimeError("--exe currently supports local .nc files only.")
+
+    src_path = os.path.abspath(target)
+    if not os.path.isfile(src_path):
+        raise FileNotFoundError(src_path)
+
+    exe_name = _safe_exe_name_from_target(src_path)
+    pyinstaller_exe = shutil.which("pyinstaller")
+    pyinstaller_cmd = [pyinstaller_exe] if pyinstaller_exe else [sys.executable, "-m", "PyInstaller"]
+
+    build_root = Path(base if (base and not _is_url(base)) else os.path.dirname(src_path)).resolve()
+    output_root = build_root / "nc_twin_exe_build"
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    safe_search_paths = _existing_search_paths(search_paths)
+    hidden_imports = [
+        "nc_twin_run_fixed",
+        "nc_console",
+        "nc",
+        "PySide6.QtWebEngineWidgets",
+        "PySide6.QtWebChannel",
+        "PySide6.QtMultimedia",
+        "PySide6.QtMultimediaWidgets",
+    ]
+
+    launcher_code = f'''# Auto-generated by nc_twin_run.py --exe\nfrom __future__ import annotations\nimport os\nimport sys\n\nHERE = os.path.dirname(os.path.abspath(__file__))\nEXTRA_PATHS = {safe_search_paths!r}\nfor _p in list(EXTRA_PATHS):\n    if _p and _p not in sys.path:\n        sys.path.insert(0, _p)\nif HERE not in sys.path:\n    sys.path.insert(0, HERE)\n\nimport nc_twin_run_fixed as twin\n\nif __name__ == "__main__":\n    raise SystemExit(twin.main([{src_path!r}]))\n'''
+
+    with tempfile.TemporaryDirectory(prefix="nc_twin_exe_") as tmp:
+        launcher = Path(tmp) / f"{exe_name}_twin_launcher.py"
+        launcher.write_text(launcher_code, encoding="utf-8")
+        cmd = pyinstaller_cmd + [
+            "--noconfirm",
+            "--clean",
+            "--onefile",
+            "--windowed",
+            "--name", exe_name,
+            "--distpath", str(output_root / "dist"),
+            "--workpath", str(output_root / "build"),
+            "--specpath", str(output_root / "spec"),
+        ]
+        for hidden in hidden_imports:
+            cmd.extend(["--hidden-import", hidden])
+        cmd.append(str(launcher))
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            details = (proc.stderr or "").strip() or (proc.stdout or "").strip() or "PyInstaller failed"
+            if "No module named PyInstaller" in details:
+                raise RuntimeError("PyInstaller is not installed. Install it with: pip install pyinstaller") from None
+            raise RuntimeError(details)
+
+    exe_path = output_root / "dist" / f"{exe_name}.exe"
+    if not exe_path.is_file():
+        raise RuntimeError(f"Build finished but EXE was not found: {exe_path}")
+    return str(exe_path)
+
+
+def _run_nc_child(child_argv: list[str]) -> int:
+    import nc_console
+    return int(nc_console.main(list(child_argv)))
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="ncw", add_help=True)
+    p.add_argument("target", nargs="?", help="Path to .nc file or URL to .nc")
+    p.add_argument("--base", default=None, help="Base folder/URL for resolving relative imports")
+    p.add_argument("--libs", action="append", default=[], help="Extra library search path (repeatable)")
+    p.add_argument("--exe", action="store_true", help="Build the local .nc file into a Windows .exe that launches the TWIN GUI host")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+
+    if "--__nc_child__" in argv:
+        idx = argv.index("--__nc_child__")
+        child_argv = argv[idx + 1:]
+        return _run_nc_child(child_argv)
+
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    if not args.target:
+        parser.print_help()
+        return 2
+
+    target = args.target
+    if (not _is_url(target)) and (not target.lower().endswith(".nc")) and os.path.isfile(target + ".nc"):
+        target = target + ".nc"
+
+    base = args.base or _compute_base(target)
+    search_paths: list[str] = []
+    if not _is_url(base):
+        search_paths.extend([base, os.path.join(base, "libs")])
+    search_paths.extend(list(args.libs or []))
+
+    if args.exe:
+        exe_path = build_exe_from_twin_target(target=target, base=base, search_paths=search_paths)
+        print("NC TWIN EXE:", exe_path)
         return 0
 
-    host = HostApp(sys.argv)
+    host = HostApp([sys.argv[0]] + argv, [target])
     return host.run()
 
 
