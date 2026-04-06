@@ -344,11 +344,44 @@ def _get_attr(obj: Any, attr: str) -> Any:
     return getattr(obj, attr)
 
 
+def _rewrite_implicit_call_expr(expr: str) -> str:
+    """Allow simple NC call syntax without parentheses, e.g. input "Name?"."""
+    s = str(expr or "").strip()
+    if not s:
+        return s
+    # already normal python-like call
+    if re.match(r'^[A-Za-z_]\w*\s*\(', s):
+        return s
+    # simple one-arg call: name <rest>
+    m = re.match(r'^([A-Za-z_]\w*)\s+(.+)$', s)
+    if not m:
+        return s
+    fn, arg = m.group(1), m.group(2).strip()
+    if not arg:
+        return s
+    # avoid rewriting operators/comparisons or chained statements
+    blocked = (" and ", " or ", " not in ", " is not ", " is ", " in ", "==", "!=", ">=", "<=", ">", "<")
+    if any(tok in s for tok in blocked):
+        return s
+    return f"{fn}({arg})"
+
+
 def safe_eval_expr(expr: str, env: Dict[str, Any], policy: NCPolicy) -> Any:
     if len(expr) > policy.max_expr_len:
         raise NCExprError("Expression too long")
+    parse_expr = expr
     try:
-        node = ast.parse(expr, mode="eval")
+        node = ast.parse(parse_expr, mode="eval")
+    except Exception as e:
+        alt = _rewrite_implicit_call_expr(expr)
+        if alt != expr:
+            try:
+                node = ast.parse(alt, mode="eval")
+                parse_expr = alt
+            except Exception:
+                raise NCExprError(f"Bad expression: {e}")
+        else:
+            raise NCExprError(f"Bad expression: {e}")
     except Exception as e:
         raise NCExprError(f"Bad expression: {e}")
 
@@ -445,11 +478,9 @@ def safe_eval_expr(expr: str, env: Dict[str, Any], policy: NCPolicy) -> Any:
         if isinstance(n, ast.BinOp):
             a, b = ev(n.left), ev(n.right)
             if isinstance(n.op, ast.Add):
-                # lenient: allow None + str / str + None
-                if a is None and isinstance(b, str):
-                    return '' + b
-                if b is None and isinstance(a, str):
-                    return a + ''
+                # lenient: allow string concatenation with mixed values
+                if isinstance(a, str) or isinstance(b, str):
+                    return ("" if a is None else str(a)) + ("" if b is None else str(b))
                 # lenient: allow None + number / number + None
                 if a is None and isinstance(b, (int, float)) and not isinstance(b, bool):
                     return 0 + b
@@ -1297,7 +1328,7 @@ _NC_ALIASABLE_KEYWORDS = {
     "pick", "text", "html", "css", "use", "anim",
     "world", "agent", "state", "actions", "bounds", "step",
     "render", "ren", "times",
-    "button", "botton", "knopf", "action", "color",
+    "button", "botton", "knopf", "action", "color", "end",
     "checkmark", "checkbox", "check", "haken", "haekchen", "häckchen", "on", "off",
     "textcolor", "textcollor", "textcolour", "fontcolor", "printcolor",
 
@@ -2071,6 +2102,8 @@ class NCParser:
             return Stmt("break", {}, ln)
         if s == "continue":
             return Stmt("continue", {}, ln)
+        if s == "end":
+            return Stmt("end", {}, ln)
 
         m = re.match(r"repeat\s+--all\s+\((.+)\)\s+times$", s)
         if m:
@@ -3435,6 +3468,7 @@ class NCInterpreter:
 
         env["range"] = range_list
         env["input"] = _nc_callable(lambda prompt="": input("" if prompt is None else str(prompt)))
+        env["end"] = _nc_callable(lambda: (_ for _ in ()).throw(NCEnd()))
         env["int"] = _nc_callable(lambda value=0: int(str(value).strip()))
         env["to_int"] = _nc_callable(lambda value, default=None: int(str(value).strip()) if str(value).strip().lstrip("-").isdigit() else default)
         env["lower"] = _nc_callable(lambda value="": str(value).lower())
@@ -4540,7 +4574,7 @@ class NCInterpreter:
                     in_module=in_module,
                     source_name=source_name,
                 )
-            except (NCMultiError, NCError):
+            except (NCMultiError, NCError, NCEnd):
                 raise
             except NCReturn as r:
                 env["__last_return__"] = r.value
@@ -4574,18 +4608,8 @@ class NCInterpreter:
             }
             if kind == "checkmark":
                 var_name = str(st.data.get("name") or "")
-                # Bugfix:
-                # Checkmark variables must be real booleans.
-                # Names like "sound" can already exist in base_env as builtin modules
-                # (for example env["sound"] = self._sound_module_object()).
-                # In that case the old code kept the module object, which caused:
-                # - checkmarks to appear pre-checked
-                # - `if sound is on:` to behave wrongly
-                # - json.save(...) to fail with "_M is not JSON serializable"
-                if var_name:
-                    existing = env.get(var_name, False)
-                    if not isinstance(existing, bool):
-                        env[var_name] = False
+                if var_name and var_name not in env:
+                    env[var_name] = False
                 item["name"] = var_name
                 item["checked"] = bool(env.get(var_name, False))
             else:
@@ -4734,6 +4758,9 @@ class NCInterpreter:
 
         if k == "continue":
             raise NCContinue()
+
+        if k == "end":
+            raise NCEnd()
 
         if k == "expr":
             try:
@@ -4884,10 +4911,8 @@ class NCInterpreter:
 
         if k == "checkmark":
             name = str(d.get("name") or "")
-            if name:
-                existing = env.get(name, False)
-                if not isinstance(existing, bool):
-                    env[name] = False
+            if name and name not in env:
+                env[name] = False
             return
 
         # UI
@@ -5307,14 +5332,17 @@ def run_text(
     stmts = _expand_repeat_program_top_level(stmts, str(source_name))
 
     with interp._with_source(str(source_name), push_stack=False):
-        interp.exec_block(
-            stmts,
-            env,
-            base_dir=base,
-            extra_paths=extra_paths,
-            in_module=False,
-            source_name=str(source_name),
-        )
+        try:
+            interp.exec_block(
+                stmts,
+                env,
+                base_dir=base,
+                extra_paths=extra_paths,
+                in_module=False,
+                source_name=str(source_name),
+            )
+        except NCEnd:
+            env["__ended__"] = True
     return env
 
 
