@@ -615,7 +615,7 @@ def safe_eval_expr(expr: str, env: Dict[str, Any], policy: NCPolicy) -> Any:
             fn = ev(n.func)
             args = [ev(a) for a in n.args]
             if isinstance(fn, NCFn):
-                return fn.call(args)
+                return fn.call(args, runtime_env=env)
             if callable(fn) and getattr(fn, "__nc_callable__", False):
                 return fn(*args)
             return fn(*args) if callable(fn) else None  # lenient: non-callable call => None
@@ -1128,10 +1128,26 @@ class NCFn:
     closure: Dict[str, Any]
     interp: "NCInterpreter"
 
-    def call(self, args: List[Any]) -> Any:
+    def call(self, args: List[Any], runtime_env: Optional[Dict[str, Any]] = None) -> Any:
         if len(args) != len(self.arg_names):
             raise RuntimeError(f"{self.name} expected {len(self.arg_names)} args, got {len(args)}")
         local = dict(self.closure)
+
+        # BUGFIX:
+        # Functions previously executed only with the environment snapshot that
+        # existed at definition time. That broke later-updated globals like
+        # checkmarks / settings variables inside button actions.
+        #
+        # Merge the current runtime environment on top of the stored closure so
+        # newer global values are visible, while still keeping function-local
+        # assignments isolated to this call.
+        if runtime_env:
+            try:
+                for k, v in runtime_env.items():
+                    local[k] = v
+            except Exception:
+                pass
+
         for k, v in zip(self.arg_names, args):
             local[k] = v
         try:
@@ -4719,9 +4735,9 @@ class NCInterpreter:
         env["__last_button_index__"] = idx
         self.exec_block(items[idx].get("body") or [], env, base_dir, extra_paths, in_module, source_name)
 
-    def _invoke_zero_arg_action(self, action: Any):
+    def _invoke_zero_arg_action(self, action: Any, env: Optional[Dict[str, Any]] = None):
         if isinstance(action, NCFn):
-            return action.call([])
+            return action.call([], runtime_env=env)
         if callable(action):
             return action()
         raise TypeError("repeat action must be callable")
@@ -4855,7 +4871,7 @@ class NCInterpreter:
                 raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
             for _ in range(max(0, n)):
                 try:
-                    self._invoke_zero_arg_action(action)
+                    self._invoke_zero_arg_action(action, env=env)
                 except Exception as e:
                     raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
             return
@@ -6140,7 +6156,9 @@ def _nc_exec_block_with_debug(self, stmts, env, base_dir='.', extra_paths=None, 
     try:
         return _ORIG_EXEC_BLOCK(self, stmts, env, base_dir=base_dir, extra_paths=extra_paths, in_module=in_module, source_name=source_name)
     except Exception as e:
-        if isinstance(e, (NCError, NCMultiError)):
+        # Keep internal control-flow exceptions untouched so the original
+        # runtime can handle them at the correct layer.
+        if isinstance(e, (NCError, NCMultiError, NCBreak, NCContinue, NCReturn, NCEnd)):
             raise
         line = 1
         try:
