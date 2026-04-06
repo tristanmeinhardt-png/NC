@@ -276,16 +276,18 @@ tick = checkmark
 
 ### `is on` / `is off`
 
-This syntax only works if you use the patched interpreter build that adds `is on` / `is off` support.
-
-Example with patched build:
+Example with `is on`/ `is off`:
 
 ```nc
 if sound is on:
   print "Sound is enabled"
+else:
+  print "Sound is disabled"
 
 if music is off:
   print "Music is disabled"
+else:
+  print "Music is enabled"
 ```
 
 If you use the normal interpreter, prefer this safer form:
