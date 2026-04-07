@@ -28,6 +28,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
+import traceback
 import base64
 import json
 import os
@@ -532,6 +535,13 @@ class TwinWindow(QMainWindow):
         else:
             self.append_log("[js.eval] QtWebEngine not available")
 
+    def bridge_post(self, payload):
+        try:
+            js = "try{ if(window.ncReceive) window.ncReceive(" + json.dumps(payload, ensure_ascii=False) + "); }catch(e){}"
+            self.eval_js(js)
+        except Exception as e:
+            self.append_log(f"[bridge.post] failed: {e}")
+
     def ui2_set_scene(self, scene: dict):
         self._set_html_only_mode(False)
         try:
@@ -657,11 +667,14 @@ class TwinWindow(QMainWindow):
 
 
 class HostApp:
-    def __init__(self, host_argv: list[str], child_argv: list[str]):
+    def __init__(self, host_argv: list[str], child_argv: list[str], target: str | None = None, base: str | None = None, search_paths: list[str] | None = None):
         self.app = QApplication.instance() or QApplication(host_argv)
         self.windows: dict[str, TwinWindow] = {}
         self.default_window_id = "nc_sim"
         self.proc = QProcess()
+        self.target = str(target or "")
+        self.base = str(base or (_compute_base(self.target) if self.target else os.getcwd()))
+        self.search_paths = list(search_paths or [])
 
         if getattr(sys, "frozen", False):
             self.proc.setProgram(sys.executable)
@@ -687,6 +700,111 @@ class HostApp:
         QTimer.singleShot(250, self._ensure_console_window)
         return self.app.exec()
 
+    def _attach_bridge_handler(self, win: TwinWindow):
+        try:
+            if getattr(win, "_nc_bridge_hooked", False):
+                return
+            bridge = getattr(win, "_web_bridge", None)
+            if bridge is None:
+                return
+            bridge.message.connect(lambda m, wid=win.wid: self._on_bridge_message(wid, m))
+            win._nc_bridge_hooked = True
+        except Exception:
+            pass
+
+    def _parse_bridge_message(self, msg: str):
+        s = str(msg or "").strip()
+        if not s:
+            return ""
+        if s[:1] in "[{":
+            try:
+                return json.loads(s)
+            except Exception:
+                return s
+        return s
+
+    def _append_to_window_log(self, wid: str, text: str, is_err: bool = False):
+        line = str(text)
+        if not line:
+            return
+        win = self.windows.get(str(wid)) or self._default_log_window()
+        prefix = "[stderr] " if is_err else ""
+        if win is not None:
+            win.append_log(prefix + line)
+        else:
+            print(prefix + line)
+
+    def _dispatch_inline_output(self, wid: str, text: str, is_err: bool = False) -> str:
+        plain: list[str] = []
+        for raw_line in str(text or "").splitlines():
+            stripped = raw_line.strip()
+            tw = _try_parse_twin(stripped)
+            if tw is not None:
+                self._handle_twin(tw)
+            else:
+                plain.append(raw_line)
+                self._append_to_window_log(wid, raw_line, is_err=is_err)
+        return "\n".join(plain)
+
+    def _run_nc_snippet(self, wid: str, code: str, source_name: str = "<html>"):
+        code = str(code or "")
+        win = self.windows.get(str(wid)) or self._default_log_window()
+        if not code.strip():
+            self._append_to_window_log(wid, "[bridge] Kein NC-Code zum Ausführen erhalten.", is_err=True)
+            if win is not None:
+                win.bridge_post({"type": "nc_result", "ok": False, "stdout": "", "stderr": "Kein NC-Code erhalten."})
+            return
+        try:
+            import nc as _nc
+        except Exception as e:
+            self._append_to_window_log(wid, f"[bridge] Konnte nc nicht importieren: {e}", is_err=True)
+            if win is not None:
+                win.bridge_post({"type": "nc_result", "ok": False, "stdout": "", "stderr": f"nc Import fehlgeschlagen: {e}"})
+            return
+
+        out_buf = io.StringIO()
+        err_buf = io.StringIO()
+        ok = True
+        try:
+            with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+                _nc.run_text(
+                    code,
+                    base=self.base,
+                    extra_paths=list(self.search_paths),
+                    policy=_nc.NCPolicy(),
+                    enable_ui=True,
+                    source_name=source_name,
+                )
+        except Exception:
+            ok = False
+            traceback.print_exc(file=err_buf)
+
+        stdout_text = self._dispatch_inline_output(wid, out_buf.getvalue(), is_err=False)
+        stderr_text = self._dispatch_inline_output(wid, err_buf.getvalue(), is_err=True)
+
+        if not stdout_text and not stderr_text:
+            stdout_text = "[nc] Code ausgeführt."
+            self._append_to_window_log(wid, stdout_text, is_err=False)
+
+        if win is not None:
+            win.bridge_post({
+                "type": "nc_result",
+                "ok": bool(ok and not stderr_text),
+                "stdout": stdout_text,
+                "stderr": stderr_text,
+            })
+
+    def _on_bridge_message(self, wid: str, msg: str):
+        payload = self._parse_bridge_message(msg)
+        if isinstance(payload, dict):
+            cmd = str(payload.get("cmd") or payload.get("action") or "").strip().lower()
+            if cmd in ("run_nc", "exec_nc", "run_code", "execute_nc"):
+                source_name = str(payload.get("source_name") or (self.target + " [html]") or "<html>")
+                self._run_nc_snippet(wid, str(payload.get("code") or ""), source_name=source_name)
+                return
+        if str(msg).strip() == "[bridge] ready":
+            return
+
     def _ensure_console_window(self):
         if self.default_window_id in self.windows:
             return
@@ -696,6 +814,7 @@ class HostApp:
         w = TwinWindow(self.default_window_id, "NC Output", 1000, 700)
         w.show()
         self.windows[self.default_window_id] = w
+        self._attach_bridge_handler(w)
         if not WEBENGINE_AVAILABLE:
             w.append_log("[info] QtWebEngine not available => HTML shows without JS. Install PySide6-QtWebEngine.")
         else:
@@ -728,6 +847,7 @@ class HostApp:
             win.set_title(title)
             win.resize(w, h)
             win.show()
+        self._attach_bridge_handler(win)
         win.raise_()
         win.activateWindow()
         return win
@@ -1237,7 +1357,7 @@ def main(argv: list[str] | None = None) -> int:
         print("NC TWIN EXE:", exe_path)
         return 0
 
-    host = HostApp([sys.argv[0]] + argv, [target])
+    host = HostApp([sys.argv[0]] + argv, [target], target=target, base=base, search_paths=search_paths)
     return host.run()
 
 
