@@ -1133,6 +1133,25 @@ if __name__ == "__main__":
     return str(exe_path)
 
 
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="ncw",
+        description="NC GUI Host / TWIN runner"
+    )
+    parser.add_argument("target", nargs="?", help="Path or URL to the .nc file")
+    parser.add_argument("--base", dest="base", help="Base path or URL directory")
+    parser.add_argument("--libs", dest="libs", action="append", default=[], help="Additional library search path (repeatable)")
+    parser.add_argument("--exe", dest="exe", action="store_true", help="Build the target as a Windows EXE")
+    return parser
+
+
+def _run_nc_child(argv: list[str]) -> int:
+    child = list(argv or [])
+    cmd = [sys.executable, NC_CONSOLE] + child
+    proc = subprocess.run(cmd)
+    return int(proc.returncode or 0)
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
