@@ -1134,8 +1134,52 @@ if __name__ == "__main__":
 
 
 
+def _argparse_stream():
+    stream = getattr(sys, "stderr", None)
+    if stream is not None and hasattr(stream, "write"):
+        return stream
+    stream = getattr(sys, "stdout", None)
+    if stream is not None and hasattr(stream, "write"):
+        return stream
+
+    class _NullStream:
+        def write(self, _msg):
+            return 0
+        def flush(self):
+            return None
+
+    return _NullStream()
+
+
+class _NCWArgumentParser(argparse.ArgumentParser):
+    """
+    Bugfix for windowed/frozen EXEs:
+    sys.stderr can be None, which makes argparse crash with
+    AttributeError: 'NoneType' object has no attribute 'write'.
+
+    We also keep errors readable instead of hard-crashing the launcher.
+    """
+    def _print_message(self, message, file=None):
+        if not message:
+            return
+        stream = file if (file is not None and hasattr(file, "write")) else _argparse_stream()
+        try:
+            stream.write(message)
+        except Exception:
+            pass
+
+    def exit(self, status=0, message=None):
+        if message:
+            self._print_message(message)
+        raise SystemExit(status)
+
+    def error(self, message):
+        self.print_usage(_argparse_stream())
+        raise SystemExit(f"{self.prog}: error: {message}")
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _NCWArgumentParser(
         prog="ncw",
         description="NC GUI Host / TWIN runner"
     )
@@ -1161,10 +1205,21 @@ def main(argv: list[str] | None = None) -> int:
         return _run_nc_child(child_argv)
 
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args, unknown = parser.parse_known_args(argv)
+    except SystemExit as e:
+        msg = str(e).strip()
+        if msg and msg != "0":
+            print(msg)
+        return int(e.code) if isinstance(e.code, int) else 2
+
+    if unknown:
+        # Freeze-Regel bugfix: ignore foreign launcher/runtime flags instead of
+        # crashing inside argparse in windowed builds.
+        print("[ncw] ignored unknown args:", " ".join(map(str, unknown)))
 
     if not args.target:
-        parser.print_help()
+        parser.print_help(_argparse_stream())
         return 2
 
     target = args.target
