@@ -310,26 +310,71 @@ def _resolve_ref(base: str, name_or_path: str) -> str:
 
 
 def _split_commas(s: str) -> List[str]:
-    # split "a, b, 'c,d'" safely (very small, not full parser)
-    out, buf, q = [], [], None
-    for ch in s:
+    # split comma-separated values safely while respecting quotes and nesting.
+    # supports (), [] and {} so calls like:
+    #   startswith("T-OS", "T-")
+    # are not split incorrectly.
+    out: List[str] = []
+    buf: List[str] = []
+    q: Optional[str] = None
+    depth_paren = 0
+    depth_brack = 0
+    depth_brace = 0
+    esc = False
+
+    for ch in str(s):
         if q:
             buf.append(ch)
+            if esc:
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+                continue
             if ch == q:
                 q = None
             continue
+
         if ch in ("'", '"'):
             q = ch
             buf.append(ch)
             continue
-        if ch == ",":
-            part = "".join(buf).strip()
+
+        if ch == '(':
+            depth_paren += 1
+            buf.append(ch)
+            continue
+        if ch == ')':
+            depth_paren = max(0, depth_paren - 1)
+            buf.append(ch)
+            continue
+        if ch == '[':
+            depth_brack += 1
+            buf.append(ch)
+            continue
+        if ch == ']':
+            depth_brack = max(0, depth_brack - 1)
+            buf.append(ch)
+            continue
+        if ch == '{':
+            depth_brace += 1
+            buf.append(ch)
+            continue
+        if ch == '}':
+            depth_brace = max(0, depth_brace - 1)
+            buf.append(ch)
+            continue
+
+        if ch == ',' and depth_paren == 0 and depth_brack == 0 and depth_brace == 0:
+            part = ''.join(buf).strip()
             if part:
                 out.append(part)
             buf = []
-        else:
-            buf.append(ch)
-    part = "".join(buf).strip()
+            continue
+
+        buf.append(ch)
+
+    part = ''.join(buf).strip()
     if part:
         out.append(part)
     return out
@@ -3542,6 +3587,14 @@ class NCInterpreter:
         env["end"] = _nc_callable(lambda: (_ for _ in ()).throw(NCEnd()))
         env["int"] = _nc_callable(lambda value=0: int(str(value).strip()))
         env["to_int"] = _nc_callable(lambda value, default=None: int(str(value).strip()) if str(value).strip().lstrip("-").isdigit() else default)
+        env["str"] = _nc_callable(lambda value="": "" if value is None else str(value))
+        env["to_str"] = env["str"]
+        env["float"] = _nc_callable(lambda value=0: float(str(value).strip().replace(",", ".")))
+        env["to_float"] = _nc_callable(lambda value, default=None: (lambda s: float(s))(str(value).strip().replace(",", ".")) if re.fullmatch(r"-?\d+(?:\.\d+)?", str(value).strip().replace(",", ".")) else default)
+        env["bool"] = _nc_callable(lambda value=None: _nc_to_bool(value))
+        env["to_bool"] = env["bool"]
+        env["round"] = _nc_callable(lambda value=0, digits=0: round(float(value), int(digits)))
+        env["abs"] = _nc_callable(lambda value=0: abs(float(value)) if isinstance(value, (int, float, decimal.Decimal)) or str(value).strip().replace(",", ".").lstrip("-").replace(".", "", 1).isdigit() else abs(value))
         env["lower"] = _nc_callable(lambda value="": str(value).lower())
         env["upper"] = _nc_callable(lambda value="": str(value).upper())
         env["strip"] = _nc_callable(lambda value="": str(value).strip())
@@ -3552,10 +3605,10 @@ class NCInterpreter:
         env["json"] = self._json_module_object()
         env["fs"] = self._fs_module_object()
         env["cam"] = self._cam_module_object()
-        env["file"] = self._file_module_object()
-        env["time"] = self._time_module_object()
-        env["text"] = self._text_module_object()
-        env["array"] = self._array_module_object()
+        env["file"] = _nc_ext_file_module_object(self)
+        env["time"] = _nc_ext_time_module_object(self)
+        env["text"] = _nc_ext_text_module_object(self)
+        env["array"] = _nc_ext_array_module_object(self)
         env["net"] = self._net_module_object()
         env["game"] = self._game_module_object()
         env["sound"] = self._sound_module_object()
@@ -3568,9 +3621,24 @@ class NCInterpreter:
         env["color"] = _nc_callable(lambda value="": str(value))
         env["get"] = get
         env["put"] = put
-        env["keys"] = keys
-        env["values"] = values
+        env["keys"] = _nc_callable(_nc_ext_keys)
+        env["values"] = _nc_callable(_nc_ext_values)
         env["items"] = items
+        env["min"] = _nc_callable(_nc_ext_min)
+        env["max"] = _nc_callable(_nc_ext_max)
+        env["contains"] = _nc_callable(_nc_ext_contains)
+        env["startswith"] = _nc_callable(_nc_ext_startswith)
+        env["endswith"] = _nc_callable(_nc_ext_endswith)
+        env["replace"] = _nc_callable(_nc_ext_replace)
+        env["split"] = _nc_callable(_nc_ext_split)
+        env["join"] = _nc_callable(_nc_ext_join)
+        env["typeof"] = _nc_callable(_nc_ext_typeof)
+        env["avg"] = _nc_callable(_nc_ext_avg)
+        env["percent"] = _nc_callable(_nc_ext_percent)
+        env["check_set"] = _nc_callable(lambda name, value: _nc_ext_check_set(self, name, value))
+        env["check_get"] = _nc_callable(lambda name, default=False: _nc_ext_check_get(self, name, default))
+        env["check_toggle"] = _nc_callable(lambda name: _nc_ext_check_toggle(self, name))
+        env["check_delete"] = _nc_callable(lambda name: _nc_ext_check_delete(self, name))
 
         env["ai"] = self._ai_module_object()
         env["ml"] = env["ai"]
@@ -3580,6 +3648,8 @@ class NCInterpreter:
         env["alias_operators"] = _nc_callable(lambda: sorted([k for k in _NC_ALIASABLE_KEYWORDS if any(ch in k for ch in "=!<>" ) or k in {"is", "is not", "in", "not in", "and", "or", "not"}]))
         env["on"] = True
         env["off"] = False
+        env["true"] = True
+        env["false"] = False
         env["__text_color__"] = None
         env["__button_color_all__"] = None
         env["__worlds__"] = {}
@@ -4413,7 +4483,7 @@ class NCInterpreter:
         return out
 
     def _builtin_module(self, name: str) -> Optional[NCModule]:
-        if name not in ("ui", "math", "json"):
+        if name not in ("ui", "math", "json", "file", "time", "text", "array"):
             return None
 
         mod = NCModule(name)
@@ -4443,6 +4513,33 @@ class NCInterpreter:
             mod.exports = exports
             return mod
 
+        if name == "file":
+            f = _nc_ext_file_module_object(self)
+            exports = {k: v for k, v in f.__dict__.items() if not str(k).startswith("_")}
+            mod.namespace = exports
+            mod.exports = exports
+            return mod
+
+        if name == "time":
+            t = _nc_ext_time_module_object(self)
+            exports = {k: v for k, v in t.__dict__.items() if not str(k).startswith("_")}
+            mod.namespace = exports
+            mod.exports = exports
+            return mod
+
+        if name == "text":
+            t = _nc_ext_text_module_object(self)
+            exports = {k: v for k, v in t.__dict__.items() if not str(k).startswith("_")}
+            mod.namespace = exports
+            mod.exports = exports
+            return mod
+
+        if name == "array":
+            a = _nc_ext_array_module_object(self)
+            exports = {k: v for k, v in a.__dict__.items() if not str(k).startswith("_")}
+            mod.namespace = exports
+            mod.exports = exports
+            return mod
         return None
 
     def load_module(
@@ -4502,8 +4599,6 @@ class NCInterpreter:
 
         export_names: List[str] = []
         stmts = _expand_repeat_program_top_level(stmts, str(mod_ref))
-
-        stmts = _expand_repeat_program_top_level(stmts, str(ref))
 
         env = self.base_env()
         env["__module__"] = module
@@ -6323,3 +6418,607 @@ def safe_eval_expr(expr: str, env: dict, policy):
     expr = expr.replace(" is off", " == False")
     return _old_safe_eval_expr(expr, env, policy)
 # --- END BUGFIX PATCH ---
+
+
+
+# ============================================================
+# NC stdlib extension patch (2026-04-10)
+# Adds:
+# - global helpers: str/to_str, float/to_float, bool/to_bool, round, abs,
+#   min, max, contains, startswith, endswith, replace, split, join, keys,
+#   values, typeof
+# - modules: text, array, file, time
+# - checkmark persistence without json: check_set/check_get/check_toggle
+# - bool aliases: true/false
+# - bugfix: import text/array/file/time as real builtin modules
+# - bugfix: builtin load_module repeat expansion no longer references stale ref
+# - bugfix: comma splitting now respects (), [] and {} so
+#   print startswith("T-OS", "T-") works
+# ============================================================
+
+try:
+    _NC_ORIG_BASE_ENV_EXT = NCInterpreter.base_env
+except Exception:
+    _NC_ORIG_BASE_ENV_EXT = None
+
+try:
+    _NC_ORIG_BUILTIN_MODULE_EXT = NCInterpreter._builtin_module
+except Exception:
+    _NC_ORIG_BUILTIN_MODULE_EXT = None
+
+
+def _nc_ext_abs_path(interp, path):
+    p = '' if path is None else str(path)
+    if not os.path.isabs(p):
+        p = os.path.join(interp._base_dir_current or '.', p)
+    return p
+
+
+def _nc_ext_typeof(value):
+    if value is None:
+        return 'none'
+    if isinstance(value, bool):
+        return 'bool'
+    if isinstance(value, int) and not isinstance(value, bool):
+        return 'int'
+    if isinstance(value, float):
+        return 'float'
+    if isinstance(value, str):
+        return 'str'
+    if isinstance(value, list):
+        return 'list'
+    if isinstance(value, tuple):
+        return 'tuple'
+    if isinstance(value, dict):
+        return 'dict'
+    if isinstance(value, NCModule):
+        return 'module'
+    if isinstance(value, NCFn):
+        return 'function'
+    return type(value).__name__
+
+
+def _nc_ext_contains(value, part):
+    try:
+        return part in value
+    except Exception:
+        return str(part) in str(value)
+
+
+def _nc_ext_startswith(value, part):
+    return str(value).startswith(str(part))
+
+
+def _nc_ext_endswith(value, part):
+    return str(value).endswith(str(part))
+
+
+def _nc_ext_replace(value, old, new):
+    return str(value).replace(str(old), str(new))
+
+
+def _nc_ext_split(value, sep=None):
+    if sep is None:
+        return str(value).split()
+    return str(value).split(str(sep))
+
+
+def _nc_ext_join(items, sep=''):
+    seq = items if isinstance(items, (list, tuple)) else [items]
+    return str(sep).join('' if x is None else str(x) for x in seq)
+
+
+def _nc_ext_keys(value):
+    if isinstance(value, dict):
+        return list(value.keys())
+    try:
+        return list(value.keys())
+    except Exception:
+        return []
+
+
+def _nc_ext_values(value):
+    if isinstance(value, dict):
+        return list(value.values())
+    try:
+        return list(value.values())
+    except Exception:
+        return []
+
+
+def _nc_ext_min(*args):
+    vals = args[0] if len(args) == 1 and isinstance(args[0], (list, tuple)) else args
+    vals = list(vals)
+    return min(vals) if vals else None
+
+
+def _nc_ext_max(*args):
+    vals = args[0] if len(args) == 1 and isinstance(args[0], (list, tuple)) else args
+    vals = list(vals)
+    return max(vals) if vals else None
+
+
+def _nc_ext_avg(values):
+    arr = list(values) if isinstance(values, (list, tuple)) else []
+    return (sum(arr) / len(arr)) if arr else 0
+
+
+def _nc_ext_percent(part, total):
+    try:
+        total_f = float(total)
+        if total_f == 0:
+            return 0
+        return (float(part) / total_f) * 100.0
+    except Exception:
+        return 0
+
+
+def _nc_ext_clamp(value, mn, mx):
+    try:
+        return max(mn, min(mx, value))
+    except Exception:
+        return value
+
+
+def _nc_ext_check_file(interp, name):
+    safe = re.sub(r'[^A-Za-z0-9_.-]+', '_', str(name).strip()) or 'default'
+    return os.path.join(interp._base_dir_current or '.', f'.nc_check_{safe}.txt')
+
+
+def _nc_ext_check_set(interp, name, value):
+    p = _nc_ext_check_file(interp, name)
+    os.makedirs(os.path.dirname(p) or '.', exist_ok=True)
+    with open(p, 'w', encoding='utf-8') as f:
+        f.write('1' if _nc_to_bool(value) else '0')
+    return _nc_to_bool(value)
+
+
+def _nc_ext_check_get(interp, name, default=False):
+    p = _nc_ext_check_file(interp, name)
+    try:
+        raw = open(p, 'r', encoding='utf-8').read().strip().lower()
+        if raw in ('1', 'true', 'yes', 'on'):
+            return True
+        if raw in ('0', 'false', 'no', 'off'):
+            return False
+    except Exception:
+        pass
+    return _nc_to_bool(default)
+
+
+def _nc_ext_check_toggle(interp, name):
+    new_val = not _nc_ext_check_get(interp, name, False)
+    _nc_ext_check_set(interp, name, new_val)
+    return new_val
+
+
+def _nc_ext_check_delete(interp, name):
+    p = _nc_ext_check_file(interp, name)
+    try:
+        os.remove(p)
+        return True
+    except Exception:
+        return False
+
+
+def _nc_ext_file_module_object(self):
+    @_nc_callable
+    def read(path):
+        p = _nc_ext_abs_path(self, path)
+        with open(p, 'r', encoding='utf-8', errors='replace') as f:
+            return f.read()
+
+    @_nc_callable
+    def write(path, value):
+        p = _nc_ext_abs_path(self, path)
+        os.makedirs(os.path.dirname(p) or '.', exist_ok=True)
+        with open(p, 'w', encoding='utf-8') as f:
+            f.write('' if value is None else str(value))
+        return p
+
+    @_nc_callable
+    def append(path, value):
+        p = _nc_ext_abs_path(self, path)
+        os.makedirs(os.path.dirname(p) or '.', exist_ok=True)
+        with open(p, 'a', encoding='utf-8') as f:
+            f.write('' if value is None else str(value))
+        return p
+
+    @_nc_callable
+    def exists(path):
+        return os.path.exists(_nc_ext_abs_path(self, path))
+
+    @_nc_callable
+    def mkdir(path):
+        p = _nc_ext_abs_path(self, path)
+        os.makedirs(p, exist_ok=True)
+        return p
+
+    @_nc_callable
+    def delete(path):
+        p = _nc_ext_abs_path(self, path)
+        try:
+            if os.path.isdir(p):
+                os.rmdir(p)
+            else:
+                os.remove(p)
+            return True
+        except Exception:
+            return False
+
+    @_nc_callable
+    def listdir(path='.'):
+        p = _nc_ext_abs_path(self, path)
+        try:
+            return os.listdir(p)
+        except Exception:
+            return []
+
+    @_nc_callable
+    def list_(path='.'):
+        return listdir(path)
+
+    @_nc_callable
+    def size(path):
+        p = _nc_ext_abs_path(self, path)
+        try:
+            return os.path.getsize(p)
+        except Exception:
+            return 0
+
+    return _nc_make_simple_module(
+        read=read, write=write, append=append, exists=exists, mkdir=mkdir,
+        delete=delete, listdir=listdir, list=list_, size=size
+    )
+
+
+def _nc_ext_time_module_object(self):
+    @_nc_callable
+    def now_ms():
+        return int(time.time() * 1000)
+
+    @_nc_callable
+    def now():
+        return time.time()
+
+    @_nc_callable
+    def unix():
+        return int(time.time())
+
+    @_nc_callable
+    def now_text():
+        return time.strftime('%Y-%m-%d %H:%M:%S')
+
+    @_nc_callable
+    def now_iso():
+        return time.strftime('%Y-%m-%dT%H:%M:%S')
+
+    @_nc_callable
+    def sleep_ms(ms):
+        time.sleep(max(0.0, float(ms) / 1000.0))
+        return True
+
+    @_nc_callable
+    def sleep(sec):
+        time.sleep(max(0.0, float(sec)))
+        return True
+
+    @_nc_callable
+    def sleep_sec(sec):
+        return sleep(sec)
+
+    return _nc_make_simple_module(
+        now_ms=now_ms, now=now, unix=unix, now_text=now_text, now_iso=now_iso,
+        sleep_ms=sleep_ms, sleep=sleep, sleep_sec=sleep_sec
+    )
+
+
+def _nc_ext_text_module_object(self):
+    @_nc_callable
+    def trim(s=''):
+        return str(s).strip()
+
+    @_nc_callable
+    def strip(s=''):
+        return str(s).strip()
+
+    @_nc_callable
+    def lower(s=''):
+        return str(s).lower()
+
+    @_nc_callable
+    def upper(s=''):
+        return str(s).upper()
+
+    @_nc_callable
+    def replace(s='', old='', new=''):
+        return str(s).replace(str(old), str(new))
+
+    @_nc_callable
+    def contains(s='', part=''):
+        return _nc_ext_contains(s, part)
+
+    @_nc_callable
+    def startswith(s='', part=''):
+        return str(s).startswith(str(part))
+
+    @_nc_callable
+    def endswith(s='', part=''):
+        return str(s).endswith(str(part))
+
+    @_nc_callable
+    def lines(s=''):
+        return str(s).splitlines()
+
+    @_nc_callable
+    def count(s='', part=''):
+        return str(s).count(str(part))
+
+    @_nc_callable
+    def split(s='', sep=None):
+        return _nc_ext_split(s, sep)
+
+    @_nc_callable
+    def join(items=None, sep=''):
+        return _nc_ext_join(items or [], sep)
+
+    return _nc_make_simple_module(
+        trim=trim, strip=strip, lower=lower, upper=upper, replace=replace,
+        contains=contains, startswith=startswith, endswith=endswith,
+        lines=lines, count=count, split=split, join=join
+    )
+
+
+def _nc_ext_array_module_object(self):
+    @_nc_callable
+    def first(arr=None):
+        arr = list(arr) if isinstance(arr, (list, tuple)) else []
+        return arr[0] if arr else None
+
+    @_nc_callable
+    def last(arr=None):
+        arr = list(arr) if isinstance(arr, (list, tuple)) else []
+        return arr[-1] if arr else None
+
+    @_nc_callable
+    def contains(arr=None, value=None):
+        try:
+            return value in (arr or [])
+        except Exception:
+            return False
+
+    @_nc_callable
+    def find(arr=None, value=None):
+        try:
+            return list(arr or []).index(value)
+        except Exception:
+            return -1
+
+    @_nc_callable
+    def slice(arr=None, start=None, end=None):
+        return list(arr or [])[start:end]
+
+    @_nc_callable
+    def reverse(arr=None):
+        return list(reversed(list(arr or [])))
+
+    @_nc_callable
+    def length(arr=None):
+        return len(arr or [])
+
+    @_nc_callable
+    def unique(arr=None):
+        return list(dict.fromkeys(list(arr or [])))
+
+    @_nc_callable
+    def push_(arr, value):
+        return push(arr, value)
+
+    @_nc_callable
+    def pop_(arr):
+        return pop(arr)
+
+    return _nc_make_simple_module(
+        first=first, last=last, contains=contains, find=find, slice=slice,
+        reverse=reverse, length=length, len=length, unique=unique,
+        push=push_, pop=pop_
+    )
+
+
+def _nc_ext_builtin_module(self, name):
+    if _NC_ORIG_BUILTIN_MODULE_EXT is not None:
+        base_mod = _NC_ORIG_BUILTIN_MODULE_EXT(self, name)
+        if base_mod is not None:
+            return base_mod
+
+    makers = {
+        'file': self._file_module_object,
+        'time': self._time_module_object,
+        'text': self._text_module_object,
+        'array': self._array_module_object,
+    }
+    if name not in makers:
+        return None
+    obj = makers[name]()
+    mod = NCModule(name)
+    exports = {}
+    for k, v in obj.__dict__.items():
+        if not str(k).startswith('_'):
+            exports[k] = v
+    mod.namespace = exports
+    mod.exports = dict(exports)
+    return mod
+
+
+def _nc_ext_load_module(self, name, base, extra_paths=None, depth=0, caller_source='<text>', caller_line=1):
+    if depth > self.policy.max_import_depth:
+        raise NCError(_format_source(caller_source), caller_line, "NC blocked: import depth exceeded", self._import_stack)
+
+    builtin = self._builtin_module(name)
+    if builtin is not None:
+        return builtin
+
+    key = f"mod:{name}@{base}"
+    if key in self.module_cache:
+        return self.module_cache[key]
+
+    candidates = self._module_search_paths(base, extra_paths)
+    mod_text = None
+    mod_ref = None
+
+    for b in candidates:
+        try:
+            ref = _resolve_ref(b, name)
+            if _is_url(ref):
+                mod_text = _fetch_url_text(ref, self.policy)
+            else:
+                mod_text = _read_file_text(ref, self.policy)
+            mod_ref = ref
+            break
+        except Exception:
+            continue
+
+    if mod_text is None:
+        if name in BUILTIN_NC_MODULES:
+            mod_ref = f"builtin:{name}"
+            mod_text = BUILTIN_NC_MODULES[name]
+        else:
+            raise NCError(_format_source(caller_source), caller_line, f"NC import not found: {name}.nc", self._import_stack)
+
+    module = NCModule(name)
+    self.module_cache[key] = module
+
+    parser = NCParser(mod_text, source_name=str(mod_ref))
+    stmts = parser.parse()
+    if parser.errors:
+        err = NCMultiError(parser.errors, header="NC parse errors")
+        print(err.format())
+        raise err
+
+    export_names = []
+    stmts = _expand_repeat_program_top_level(stmts, str(mod_ref))
+
+    env = self.base_env()
+    env["__module__"] = module
+    env["__exports__"] = export_names
+    env["__export_base_keys__"] = set(env.keys())
+
+    if _is_url(mod_ref or ''):
+        base_dir = (mod_ref or '').rsplit('/', 1)[0] + '/'
+    else:
+        base_dir = os.path.dirname(mod_ref) if mod_ref and not _is_url(mod_ref) else base
+
+    with self._with_source(str(mod_ref), push_stack=True):
+        self.exec_block(
+            stmts,
+            env,
+            base_dir=base_dir,
+            extra_paths=extra_paths,
+            in_module=True,
+            source_name=str(mod_ref),
+        )
+
+    module.namespace = {k: v for k, v in env.items() if not k.startswith("__")}
+    module.finalize_exports(export_names)
+    return module
+
+
+def _nc_ext_base_env(self):
+    env = _NC_ORIG_BASE_ENV_EXT(self) if _NC_ORIG_BASE_ENV_EXT is not None else {}
+
+    env.update({
+        'str': _nc_callable(lambda value='': '' if value is None else str(value)),
+        'to_str': _nc_callable(lambda value='': '' if value is None else str(value)),
+        'float': _nc_callable(lambda value=0.0: float(str(value).strip().replace(',', '.'))),
+        'to_float': _nc_callable(lambda value=0.0, default=None: (lambda s: float(s) if re.fullmatch(r'-?\d+(?:\.\d+)?', s) else default)(str(value).strip().replace(',', '.'))),
+        'bool': _nc_callable(lambda value=None: _nc_to_bool(value)),
+        'to_bool': _nc_callable(lambda value=None: _nc_to_bool(value)),
+        'round': _nc_callable(lambda value=0, ndigits=0: round(value, int(ndigits))),
+        'abs': _nc_callable(lambda value=0: abs(value)),
+        'min': _nc_callable(_nc_ext_min),
+        'max': _nc_callable(_nc_ext_max),
+        'contains': _nc_callable(_nc_ext_contains),
+        'startswith': _nc_callable(_nc_ext_startswith),
+        'endswith': _nc_callable(_nc_ext_endswith),
+        'replace': _nc_callable(_nc_ext_replace),
+        'split': _nc_callable(_nc_ext_split),
+        'join': _nc_callable(_nc_ext_join),
+        'keys': _nc_callable(_nc_ext_keys),
+        'values': _nc_callable(_nc_ext_values),
+        'typeof': _nc_callable(_nc_ext_typeof),
+        'length': _nc_callable(lambda value=None: len(value) if value is not None else 0),
+        'unique': _nc_callable(lambda arr=None: list(dict.fromkeys(list(arr or [])))),
+        'now': _nc_callable(lambda: time.time()),
+        'now_text': _nc_callable(lambda: time.strftime('%Y-%m-%d %H:%M:%S')),
+        'sleep_sec': _nc_callable(lambda sec: (time.sleep(max(0.0, float(sec))), True)[1]),
+        'clamp': _nc_callable(_nc_ext_clamp),
+        'avg': _nc_callable(_nc_ext_avg),
+        'percent': _nc_callable(_nc_ext_percent),
+        'check_set': _nc_callable(lambda name, value: _nc_ext_check_set(self, name, value)),
+        'check_get': _nc_callable(lambda name, default=False: _nc_ext_check_get(self, name, default)),
+        'check_toggle': _nc_callable(lambda name: _nc_ext_check_toggle(self, name)),
+        'check_delete': _nc_callable(lambda name: _nc_ext_check_delete(self, name)),
+        'true': True,
+        'false': False,
+    })
+
+    env['file'] = self._file_module_object()
+    env['time'] = self._time_module_object()
+    env['text'] = self._text_module_object()
+    env['array'] = self._array_module_object()
+    return env
+
+
+def _nc_ext_split_commas(s: str) -> list:
+    out, buf, q = [], [], None
+    paren = 0
+    bracket = 0
+    brace = 0
+    for ch in s:
+        if q:
+            buf.append(ch)
+            if ch == q:
+                q = None
+            continue
+        if ch in ("'", '"'):
+            q = ch
+            buf.append(ch)
+            continue
+        if ch == '(':
+            paren += 1
+            buf.append(ch)
+            continue
+        if ch == ')':
+            paren = max(0, paren - 1)
+            buf.append(ch)
+            continue
+        if ch == '[':
+            bracket += 1
+            buf.append(ch)
+            continue
+        if ch == ']':
+            bracket = max(0, bracket - 1)
+            buf.append(ch)
+            continue
+        if ch == '{':
+            brace += 1
+            buf.append(ch)
+            continue
+        if ch == '}':
+            brace = max(0, brace - 1)
+            buf.append(ch)
+            continue
+        if ch == ',' and paren == 0 and bracket == 0 and brace == 0:
+            part = ''.join(buf).strip()
+            if part:
+                out.append(part)
+            buf = []
+        else:
+            buf.append(ch)
+    part = ''.join(buf).strip()
+    if part:
+        out.append(part)
+    return out
+
+
+
