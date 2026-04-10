@@ -20,14 +20,18 @@ NC is focused on:
 - AI programming
 
 ---
+
 # Why should I use NC?
+
 ## NC is a simple scripting language built on Python that makes console apps easier to write, read, and share.
 
 ### Think of NC as:
+
 - simpler Python for CLI apps
 - scripting language with built-in UI elements
 - fast prototyping language
 - beginner-friendly syntax
+
 ---
 
 ## Windows only
@@ -97,11 +101,35 @@ Run a local NC file:
 python nc_console.py my_program.nc
 ```
 
-If you have a wrapper/alias installed, this may also work:
+If you have a wrapper or alias installed, this may also work:
 
 ```bash
 nc my_program.nc
 ```
+
+Run an NC file from a URL:
+
+```bash
+nc https://example.com/test.nc
+```
+
+### CLI options
+
+NC also supports additional CLI options:
+
+```bash
+nc my_program.nc --base C:\Users\meinh\NC
+nc my_program.nc --libs C:\Users\meinh\NC\libs
+nc my_program.nc --allow-http
+nc my_program.nc --allow-private
+```
+
+What they do:
+
+- `--base` → sets the base folder or URL directory for imports
+- `--libs` → adds additional search paths for imports
+- `--allow-http` → allows insecure HTTP imports and URLs
+- `--allow-private` → allows private or localhost hosts
 
 ### Important for buttons and checkmarks
 
@@ -119,17 +147,23 @@ You can build a Windows executable from a local `.nc` file:
 python nc_console.py my_program.nc --exe
 ```
 
+For GUI/TWIN programs you can also use:
+
+```bash
+python nc_twin_run.py my_program.nc --exe
+```
+
 This feature requires `pyinstaller`.
 
 ---
 
 # New in this version
 
-This version adds several quality-of-life features for console apps and menus.
+This version adds several quality-of-life features for console apps, menus, reusable code, and GUI output.
 
 ## 1. Input without parentheses
 
-Both styles now work:
+Both styles work:
 
 ```nc
 let name = input("What is your name?")
@@ -141,7 +175,7 @@ let name = input "What is your name?"
 
 ## 2. Better `+` string concatenation
 
-This now works much better:
+This works well even with mixed values:
 
 ```nc
 let name = input "What is your name?"
@@ -156,14 +190,6 @@ print "Hello, " + name + "!"
 print "Hello"
 end
 print "This will not run"
-```
-
-This is especially useful in buttons:
-
-```nc
-button "Exit":
-  action:
-    end
 ```
 
 ## 4. `end` can be aliased
@@ -200,6 +226,101 @@ knopf "Play":
 
 For documentation and examples, `button` is recommended as the standard spelling.
 
+## 6. `repeat (function) N times`
+
+NC supports directly repeating a callable action:
+
+```nc
+fn ping():
+  print "hi"
+
+repeat (ping) 5 times
+```
+
+This also works without parentheses for simple names:
+
+```nc
+repeat ping 3 times
+```
+
+## 7. `repeat --all N times`
+
+NC can repeat the whole top-level program:
+
+```nc
+repeat --all 3 times
+```
+
+You can also write:
+
+```nc
+repeat --all (3) times
+```
+
+## 8. `export --all`
+
+Inside modules you can export everything at once:
+
+```nc
+export --all
+```
+
+## 9. `from "...“ import ... as ...`
+
+NC supports path-based imports with optional aliasing:
+
+```nc
+from "libs" import tools
+from "libs" import tools as helper
+```
+
+## 10. `return` and `ret`
+
+Both forms are accepted inside functions:
+
+```nc
+fn add():
+  ret 5
+```
+
+```nc
+fn add():
+  return 5
+```
+
+## 11. `break` and `continue`
+
+Loop control keywords are supported:
+
+```nc
+break
+continue
+```
+
+## 12. More color keyword variants
+
+NC supports additional text color names:
+
+- `textcolor`
+- `textcollor`
+- `textcolour`
+- `fontcolor`
+- `printcolor`
+
+Example:
+
+```nc
+fontcolor red
+print "Hello"
+```
+
+Global text color:
+
+```nc
+printcolor --all blue
+print "Everything is blue"
+```
+
 ---
 
 # Complete NC learning guide
@@ -210,6 +331,12 @@ For documentation and examples, `button` is recommended as the standard spelling
 print "Hello world"
 print "NC is simple"
 print "NC is readable"
+```
+
+NC can also print multiple values:
+
+```nc
+print "Score:", 10, "Lives:", 3
 ```
 
 ## 2. Variables
@@ -253,6 +380,20 @@ fn greet():
 greet()
 ```
 
+Returning values:
+
+```nc
+fn get_name():
+  return "Alex"
+```
+
+or:
+
+```nc
+fn get_name():
+  ret "Alex"
+```
+
 ## 4. Repeat blocks
 
 ```nc
@@ -260,7 +401,23 @@ repeat 3:
   print "Hello"
 ```
 
-## 5. Aliases
+## 5. Repeating functions directly
+
+```nc
+fn ping():
+  print "hi"
+
+repeat (ping) 3 times
+```
+
+## 6. Repeat the whole program
+
+```nc
+print "This whole file repeats"
+repeat --all 2 times
+```
+
+## 7. Aliases
 
 ```nc
 repeat = again
@@ -269,7 +426,16 @@ again 3:
   print "Hi"
 ```
 
-## 6. Conditions
+You can also alias `times` and similar words if your NC setup defines them:
+
+```nc
+repeat = wiederhole
+times = mal
+
+wiederhole (ping) 2 mal
+```
+
+## 8. Conditions
 
 ```nc
 let x = 5
@@ -286,7 +452,7 @@ else:
   print "disabled"
 ```
 
-## 7. `when` as a simpler alias
+## 9. `when` as a simpler alias
 
 ```nc
 when x == 10:
@@ -295,7 +461,7 @@ else:
   print "not ten"
 ```
 
-## 8. Buttons
+## 10. Buttons
 
 Inside a button block, action code must be placed inside `action:`.
 
@@ -340,7 +506,13 @@ button "Play":
     print "Starting"
 ```
 
-## 9. Checkmarks
+### Global button color
+
+```nc
+color --all "cyan"
+```
+
+## 11. Checkmarks
 
 Basic example:
 
@@ -372,6 +544,15 @@ tick = checkmark
 (music) = tick "Music"
 ```
 
+Alternative accepted names include:
+
+- `checkmark`
+- `checkbox`
+- `check`
+- `haken`
+- `haekchen`
+- `häckchen`
+
 ### `is on` / `is off`
 
 ```nc
@@ -390,7 +571,7 @@ else:
   print "Sound is disabled"
 ```
 
-## 10. Colors
+## 12. Colors
 
 ```nc
 textcolor red
@@ -402,7 +583,16 @@ textcolor --all blue
 print "Everything is blue"
 ```
 
-## 11. Input
+Alternative text color spellings also work:
+
+```nc
+fontcolor green
+print "Green text"
+
+printcolor --all yellow
+```
+
+## 13. Input
 
 Classic call style:
 
@@ -411,14 +601,14 @@ let name = input("What is your name?")
 print name
 ```
 
-New short style:
+Short style:
 
 ```nc
 let name = input "What is your name?"
 print "Hello, " + name + "!"
 ```
 
-## 12. Imports
+## 14. Imports
 
 NC contains built-in placeholder modules such as `ui`, `math`, and `json`.
 
@@ -429,7 +619,29 @@ print math.pi
 import json
 ```
 
-## 13. Saving and loading data
+NC also supports importing from a specific base path:
+
+```nc
+from "libs" import tools
+from "libs" import tools as helper
+```
+
+## 15. Exporting from modules
+
+Single export:
+
+```nc
+export hello
+export run
+```
+
+Export everything:
+
+```nc
+export --all
+```
+
+## 16. Saving and loading data
 
 Use the `json` module.
 
@@ -458,7 +670,17 @@ else:
   print "Saved sound was OFF"
 ```
 
-## 14. GUI / TWIN output
+## 17. Flow control
+
+NC supports `break`, `continue`, and `end`.
+
+```nc
+break
+continue
+end
+```
+
+## 18. GUI / TWIN output
 
 NC can also produce structured GUI-style output through `__TWIN__` messages.
 
@@ -468,9 +690,40 @@ The GUI host can render:
 - tables
 - plots
 - HTML content
+- CSS and JavaScript in GUI windows
 - TWIN / `t_windows` style messages
 
-## 15. NC server mode
+### JavaScript bridge
+
+In HTML-based GUI windows, JavaScript can send messages back to the log output:
+
+```js
+ncSend("hello")
+```
+
+### HTML eval support
+
+The GUI host also supports commands such as:
+
+- `html.eval`
+- `js.eval`
+
+This allows dynamic JavaScript execution in the loaded HTML window.
+
+## 19. `t_windows.py` helper API
+
+NC projects can also use the TWIN helper module for structured window creation.
+
+Concepts include:
+
+- `Tk`
+- `Toplevel`
+- window geometry
+- fullscreen windows
+- custom window style
+- direct HTML content
+
+## 20. NC server mode
 
 `nc_server.py` can run NC files as lightweight web handlers.
 
@@ -480,6 +733,17 @@ It can:
 - inject request data into NC code
 - capture NC output
 - return HTTP metadata and body content
+- answer CORS preflight requests
+- serve dynamic responses based on request data
+
+Inside the executed NC file, a request object is injected automatically:
+
+```nc
+print request["method"]
+print request["path"]
+```
+
+NC server handlers can also return HTTP metadata through a special first output line using `__HTTP__`.
 
 ---
 
@@ -528,7 +792,16 @@ repeat 3:
   print "Repeat works"
 ```
 
-## Step 5: Use conditions
+## Step 5: Repeat a function directly
+
+```nc
+fn ping():
+  print "hi"
+
+repeat (ping) 3 times
+```
+
+## Step 6: Use conditions
 
 ```nc
 let x = 5
@@ -539,7 +812,7 @@ else:
   print "Wrong"
 ```
 
-## Step 6: Create your first menu
+## Step 7: Create your first menu
 
 ```nc
 print "Main menu"
@@ -557,7 +830,7 @@ button "Exit":
     end
 ```
 
-## Step 7: Add checkmarks
+## 8. Add checkmarks
 
 ```nc
 (sound) = checkmark "Sound" color "green"
@@ -571,7 +844,7 @@ button "Continue":
       print "Sound is off"
 ```
 
-## Step 8: Ask the user for a name
+## Step 9: Ask the user for a name
 
 ```nc
 button "Say hello":
@@ -580,7 +853,7 @@ button "Say hello":
     print "Hello, " + name + "!"
 ```
 
-## Step 9: Exit cleanly
+## Step 10: Exit cleanly
 
 ```nc
 button "Exit":
@@ -588,7 +861,7 @@ button "Exit":
     end
 ```
 
-## Step 10: Export your program
+## Step 11: Export your program
 
 ```bash
 python nc_console.py my_game.nc --exe
@@ -693,6 +966,27 @@ button "Save Settings":
 button "Exit":
   action:
     end
+```
+
+## 5. Module export example
+
+```nc
+fn hello():
+  print "Hello"
+
+fn bye():
+  print "Bye"
+
+export --all
+```
+
+## 6. Repeat function example
+
+```nc
+fn ping():
+  print "hi"
+
+repeat (ping) 5 times
 ```
 
 ---
